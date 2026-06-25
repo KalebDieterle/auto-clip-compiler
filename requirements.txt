@@ -1,0 +1,10 @@
+tensorflow
+tensorflow-hub
+setuptools<81
+
+numpy
+opencv-python
+pytesseract
+scipy
+pandas
+tqdm

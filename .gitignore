@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Setup artifact
+install.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
