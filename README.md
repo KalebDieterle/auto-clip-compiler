@@ -84,6 +84,39 @@ So this tool exports **FCPXML** instead, which the free version imports cleanly 
   run.log
 ```
 
+## Smart re-ranking (optional `--smart-rank`)
+By default moments are ranked purely by laughter loudness/intensity. `--smart-rank` adds a content
+pass: it transcribes each candidate moment with **faster-whisper** and asks an **LLM** to score it 1–10
+for clip-worthiness (judging *what was said* + the laughter), then ranks by that. Laughter becomes one
+signal among several. The `transcript` and `llm_score` land in `manifest.csv`. Any failure falls back to
+laughter ranking — it never crashes the run.
+
+The judge is provider-agnostic — two ways to wire it:
+
+**A) OpenAI-compatible HTTP endpoint** (DeepSeek, OpenRouter, Ollama, …):
+```powershell
+# DeepSeek's own API (cheap):
+$env:DEEPSEEK_API_KEY = "sk-..."
+python highlights.py --smart-rank --llm-model deepseek-chat   # base-url defaults to api.deepseek.com
+
+# A FREE model via OpenRouter:
+$env:OPENAI_API_KEY = "sk-or-..."
+python highlights.py --smart-rank `
+  --llm-base-url https://openrouter.ai/api/v1 `
+  --llm-model "deepseek/deepseek-chat-v3.1:free"
+```
+
+**B) Any CLI** (your Cline/Ollama/etc.) — pipe the prompt to its stdin, read the reply from stdout:
+```powershell
+python highlights.py --smart-rank --llm-command "ollama run deepseek-r1"
+```
+The command must accept the prompt on **stdin** and print the model's reply (containing the JSON array)
+on **stdout**. Note: an interactive agent like Cline is a clumsy fit here — prefer mode A with a free
+OpenRouter model if you can.
+
+Knobs: `--whisper-model` (tiny/base/small/medium), `--smart-pool` (how many candidates to transcribe+judge,
+default 150), `--smart-batch` (moments per LLM call), `--llm-timeout`.
+
 ## Tuning notes
 - **Game detection** leans on OCR keywords (`RUST_KEYWORDS` / `CS2_KEYWORDS` in `highlights.py`) plus a
   colour heuristic. If a real Rust/CS2 clip lands in `OTHER`, lower `--other-floor`; if too many clips

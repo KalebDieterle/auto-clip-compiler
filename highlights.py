@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import re
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +117,8 @@ class Moment:
     funny_score: float
     in_t: float = 0.0
     out_t: float = 0.0
+    transcript: str = ""
+    llm_score: float | None = None      # 1-10 clip-worthiness from --smart-rank
 
 
 # --------------------------------------------------------------------------------------
@@ -535,11 +539,13 @@ def write_manifest(path: Path, moments: list[Moment]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["rank", "filename", "game", "classification_confidence", "funny_score",
-                    "in_timestamp", "out_timestamp", "clip_duration", "source_path",
-                    "copied_path"])
+                    "llm_score", "transcript", "in_timestamp", "out_timestamp",
+                    "clip_duration", "source_path", "copied_path"])
         for i, m in enumerate(moments, 1):
             c = m.clip
             w.writerow([i, c.path.name, c.game, c.confidence, m.funny_score,
+                        "" if m.llm_score is None else m.llm_score,
+                        (m.transcript or "")[:300],
                         _fmt_ts(m.in_t), _fmt_ts(m.out_t), round(c.duration, 2),
                         str(c.path), str(c.copied_path or "")])
     log.info("Wrote manifest: %s (%d rows)", path.name, len(moments))
@@ -685,6 +691,121 @@ def assign_boundaries(moments: list[Moment], args) -> None:
                 sils = []
             m.in_t, m.out_t = compute_boundaries(m, sils, m.clip.duration,
                                                  args.min_dur, args.max_dur)
+
+
+# --------------------------------------------------------------------------------------
+# Phase E2 — smart re-ranking: transcript (faster-whisper) + LLM clip-worthiness judge.
+# Optional (--smart-rank). Falls back to laughter ranking on any failure.
+# --------------------------------------------------------------------------------------
+_WHISPER = None
+
+
+def load_whisper(args):
+    global _WHISPER
+    if _WHISPER is None:
+        from faster_whisper import WhisperModel
+        log.info("Loading faster-whisper '%s' (first run downloads it)...", args.whisper_model)
+        _WHISPER = WhisperModel(args.whisper_model, device="cpu", compute_type="int8")
+    return _WHISPER
+
+
+def transcribe_moments(moments: list[Moment], args) -> None:
+    """Transcribe each moment's audio window from its already-extracted 16k wav."""
+    model = load_whisper(args)
+    audio_dir = Path(args.output) / "audio"
+    cache: dict[Path, np.ndarray] = {}
+    for m in tqdm(moments, desc="Transcribing", unit="clip"):
+        try:
+            src = m.clip.copied_path or m.clip.path
+            wavp = audio_dir / (src.stem + ".wav")
+            if not wavp.exists():
+                continue
+            if wavp not in cache:
+                cache[wavp] = read_wav(wavp)
+            data = cache[wavp]
+            seg = data[max(0, int(m.in_t * SAMPLE_RATE)): int(m.out_t * SAMPLE_RATE)]
+            if seg.size < SAMPLE_RATE // 2:
+                continue
+            segments, _ = model.transcribe(seg, language="en", vad_filter=True)
+            m.transcript = " ".join(s.text.strip() for s in segments).strip()
+        except Exception as e:
+            log.warning("Transcription failed for %s: %s", m.clip.path.name, e)
+
+
+def _judge_prompt(batch: list[Moment]) -> str:
+    head = (
+        "You rate moments from a gaming session (Rust / Counter-Strike 2) for a FUNNY "
+        "highlights compilation. For each moment, output an integer 1-10 for how clip-worthy "
+        "it is: judge what was SAID (the transcript) and the laughter intensity together. "
+        "10=must-include banger, 1=boring/nothing happens. Reward genuine reactions, jokes, "
+        "clutch/fail callouts, banter. Penalize silence or filler.\n"
+        'Reply with ONLY a JSON array, one object per moment, e.g. '
+        '[{"i":0,"score":7},{"i":1,"score":3}] — no other text.\n'
+    )
+    rows = []
+    for idx, m in enumerate(batch):
+        t = (m.transcript or "(no speech detected)").replace("\n", " ")[:500]
+        rows.append(f'Moment {idx}: game={m.clip.game}, laughter={m.funny_score:.2f}, '
+                    f'len={m.out_t - m.in_t:.0f}s\nTranscript: "{t}"')
+    return head + "\n" + "\n\n".join(rows)
+
+
+def llm_complete(prompt: str, args) -> str:
+    """Either pipe the prompt to --llm-command's stdin, or POST to an OpenAI-compatible API."""
+    if args.llm_command:
+        # Run via the shell so any command line works (incl. Windows paths/args).
+        cp = subprocess.run(args.llm_command, shell=True, input=prompt,
+                            capture_output=True, text=True, timeout=args.llm_timeout)
+        if cp.returncode != 0:
+            raise RuntimeError(f"llm-command exit {cp.returncode}: {cp.stderr.strip()[:200]}")
+        return cp.stdout
+    key = (args.llm_api_key or os.environ.get("OPENAI_API_KEY")
+           or os.environ.get("DEEPSEEK_API_KEY") or "")
+    url = args.llm_base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps({"model": args.llm_model, "temperature": 0,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=args.llm_timeout) as resp:
+        data = json.loads(resp.read().decode())
+    return data["choices"][0]["message"]["content"]
+
+
+def _parse_scores(text: str) -> dict[int, float]:
+    m = re.search(r"\[.*\]", text, re.S)
+    if not m:
+        return {}
+    try:
+        arr = json.loads(m.group(0))
+    except Exception:
+        return {}
+    out: dict[int, float] = {}
+    for o in arr:
+        try:
+            out[int(o["i"])] = float(o["score"])
+        except Exception:
+            continue
+    return out
+
+
+def judge_moments(moments: list[Moment], args) -> None:
+    b = max(1, args.smart_batch)
+    for start in tqdm(range(0, len(moments), b), desc="LLM judging", unit="batch"):
+        batch = moments[start:start + b]
+        try:
+            scores = _parse_scores(llm_complete(_judge_prompt(batch), args))
+            for idx, m in enumerate(batch):
+                if idx in scores:
+                    m.llm_score = max(1.0, min(10.0, scores[idx]))
+        except Exception as e:
+            log.warning("LLM judge batch @%d failed (%s); those keep laughter ranking.", start, e)
+
+
+def smart_rank(moments: list[Moment], args) -> None:
+    transcribe_moments(moments, args)
+    judge_moments(moments, args)
+    scored = sum(1 for m in moments if m.llm_score is not None)
+    log.info("smart-rank: %d/%d candidates scored by the LLM judge.", scored, len(moments))
 
 
 def build_timelines(moments: list[Moment], args) -> None:
@@ -845,6 +966,25 @@ def parse_args(argv=None):
                    help="Also write a single combined timeline/video across both games.")
     p.add_argument("--redetect", action="store_true",
                    help="Force fresh game detection even if clips were sorted on a prior run.")
+    # --- smart re-ranking (optional): transcript + LLM clip-worthiness judge ---
+    p.add_argument("--smart-rank", action="store_true",
+                   help="Transcribe candidates (faster-whisper) and re-rank by an LLM "
+                        "clip-worthiness score instead of raw laughter.")
+    p.add_argument("--whisper-model", default="base",
+                   help="faster-whisper model: tiny/base/small/medium (default base).")
+    p.add_argument("--smart-pool", type=int, default=150,
+                   help="Max candidate moments to transcribe+judge (<=0 = all candidates).")
+    p.add_argument("--smart-batch", type=int, default=12, help="Moments per LLM judging request.")
+    p.add_argument("--llm-base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
+                   help="OpenAI-compatible chat endpoint (DeepSeek, OpenRouter, Ollama, ...).")
+    p.add_argument("--llm-model", default=os.environ.get("OPENAI_MODEL", "deepseek-chat"),
+                   help="LLM model id used for judging.")
+    p.add_argument("--llm-api-key", default=None,
+                   help="API key (else OPENAI_API_KEY / DEEPSEEK_API_KEY env var).")
+    p.add_argument("--llm-command", default=os.environ.get("LLM_COMMAND"),
+                   help="Instead of HTTP: pipe the prompt to this CLI's stdin and read JSON "
+                        "from stdout (e.g. your Cline/Ollama wrapper).")
+    p.add_argument("--llm-timeout", type=float, default=120.0, help="LLM call timeout, seconds.")
     p.add_argument("--preflight", nargs="?", type=int, const=8, default=None, metavar="K",
                    help="Game-detect the first K clips (default 8), print results, and exit.")
     p.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 1),
@@ -910,6 +1050,14 @@ def main(argv=None):
 
     # ---- Phase F: silence-aware boundaries (on candidates) ----
     assign_boundaries(candidates, args)
+
+    # ---- Phase E2 (optional): transcript + LLM clip-worthiness re-ranking ----
+    if args.smart_rank:
+        pool = candidates if args.smart_pool <= 0 else candidates[:args.smart_pool]
+        smart_rank(pool, args)
+        # LLM-scored moments rank first (by score), unscored fall back to laughter order.
+        candidates.sort(key=lambda m: (m.llm_score is not None, m.llm_score or 0.0,
+                                       m.funny_score), reverse=True)
 
     top = dedup_moments(candidates)[:args.top]
     log.info("Selected top %d of %d moments (after de-dup).", len(top), len(moments))
