@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Bridge between highlights.py --smart-rank and the Cline CLI.
+"""Bridge between autoclip.py --smart-rank and the Cline CLI.
 
-highlights.py's --llm-command mode pipes the judge prompt to this script's STDIN.
+autoclip.py's --llm-command mode pipes the judge prompt to this script's STDIN.
 We forward it to the Cline CLI (default model: DeepSeek V4 Flash, which is free via
 Cline, hosted, and doesn't touch your GPU) and print the model's final reply (the
-JSON score array) to STDOUT, which highlights.py then parses.
+JSON score array) to STDOUT, which autoclip.py then parses.
 
 cline takes the prompt as an ARGUMENT (not stdin), and on Windows a multi-line prompt
 full of quotes/`%`/`&` would be mangled by cmd.exe — so we invoke cline's Node entry
 directly (node passes argv verbatim, no shell re-parsing).
 
-Usage from highlights.py:
+Usage from autoclip.py:
     --smart-rank --llm-command "python cline_judge.py"
 Optional env: CLINE_JUDGE_MODEL (default deepseek/deepseek-v4-flash),
               CLINE_JUDGE_TIMEOUT (seconds, default 180).

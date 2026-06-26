@@ -1,4 +1,4 @@
-# Setup for obs-highlights (run from this folder in PowerShell)
+# Setup for Auto Clip Compiler (run from this folder in PowerShell)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -27,4 +27,4 @@ Write-Host "    winget install Gyan.FFmpeg"
 Write-Host "    winget install UB-Mannheim.TesseractOCR"
 Write-Host ""
 Write-Host "Then test detection (no copying) with:" -ForegroundColor Cyan
-Write-Host "    python highlights.py --preflight 8"
+Write-Host "    python autoclip.py --preflight 8 --source <your clips folder>"

@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-obs-highlights — auto-assemble funny-moment highlight drafts from OBS replay clips.
+Auto Clip Compiler — auto-assemble funny-moment highlight reels from any folder of clips.
+
+Works on any file-based clips (OBS replays, ShadowPlay, screen recordings, ...).
 
 Pipeline:
   A. Discover clips in the (read-only) source folder.
-  B. Detect game visually (ffmpeg frame sampling + Tesseract OCR + colour heuristic).
-  C. Sort COPIES into Rust / CS2 / Unsorted. Other games are left in source only.
-  D. Detect laughter (YAMNet) with an audio-energy gate.
-  E. Rank every laughter moment, keep the top N.
+  B. (optional) Detect game visually (ffmpeg frame sampling + Tesseract OCR) to sort by game,
+     OR --all-games to skip sorting and search everything together.
+  C. Sort COPIES into Rust / CS2 / Unsorted (skipped with --all-games; never with --every-clip).
+  D. Find candidate moments: laughter (YAMNet) with an audio-energy gate, and with
+     --every-clip a window on each clip's loudest beat so silent/visual gags count too.
+  E. Rank moments (laughter, or --smart-rank: transcript + LLM clip-worthiness), then keep
+     the top N or everything above --min-score.
   F. Snap clip in/out points to natural conversational pauses (ffmpeg silencedetect).
   G. Write a manifest CSV shot-list.
-  H. Write DaVinci-Resolve-importable FCPXML timelines (per game + optional combined).
+  H. Write DaVinci-Resolve-importable FCPXML timelines + rendered MP4 compilations.
 
-RULE #0: NON-DESTRUCTIVE. The source folder is the master copy. We only ever COPY.
+RULE #0: NON-DESTRUCTIVE. The source folder is the master copy. We only ever COPY (or, with
+--all-games / --every-clip, read straight from source without copying).
 
-See README.md for setup. Run `python highlights.py --preflight 8` first to sanity-check
+See README.md for setup. Run `python autoclip.py --preflight 8` first to sanity-check
 game detection before committing to a full batch.
 """
 
@@ -45,13 +51,14 @@ except Exception:  # pragma: no cover - tqdm is a hard dep, but degrade graceful
     def tqdm(it, **kw):
         return it
 
-log = logging.getLogger("highlights")
+log = logging.getLogger("autoclip")
 
 # --------------------------------------------------------------------------------------
 # Defaults
 # --------------------------------------------------------------------------------------
-DEFAULT_SOURCE = r"C:\Users\<user>\Videos\OBS Clips"
-DEFAULT_OUTPUT = r"C:\Users\<user>\Videos\Highlights"
+# Relative defaults so the tool is portable. Override with --source / --output.
+DEFAULT_SOURCE = "clips"
+DEFAULT_OUTPUT = "highlights"
 VIDEO_EXTS = {".mkv", ".mp4", ".mov", ".flv", ".m4v"}
 
 # YAMNet laughter class indices (from yamnet_class_map.csv):
@@ -359,8 +366,12 @@ def read_wav(path: Path) -> np.ndarray:
 
 
 def find_moments(wav: np.ndarray, laugh_idx: list[int], laugh_thr: float,
-                 energy_pct: float) -> list[tuple[float, float, float]]:
-    """Return list of (start_s, end_s, funny_score)."""
+                 energy_pct: float, ensure_one: bool = False) -> list[tuple[float, float, float]]:
+    """Return list of (start_s, end_s, funny_score).
+
+    With ensure_one=True (--every-clip), a clip that has no laughter above the bar still
+    yields ONE candidate, anchored on its loudest frame (the action beat — a kill, hit,
+    etc.), so silent/visual-gag clips aren't dropped before the LLM ever sees them."""
     model = load_yamnet()
     scores, _, _ = model(wav)
     scores = scores.numpy()                         # [num_frames, 521]
@@ -406,6 +417,14 @@ def find_moments(wav: np.ndarray, laugh_idx: list[int], laugh_thr: float,
         funny = peak_laugh * (0.5 + 0.5 * peak_rms)
         moments.append((start_s, end_s, round(funny, 4)))
         i = j + 1
+
+    if not moments and ensure_one and n > 0:
+        # No laughter cleared the bar — anchor one window on the loudest frame so this clip
+        # still becomes a candidate. funny stays below any real laughter moment (< laugh_thr).
+        peak = int(np.argmax(rms))
+        peak_t = peak * YAMNET_HOP_S
+        funny = round(min(float(laugh_prob.max()), laugh_thr * 0.99) * 0.5, 4)
+        moments.append((peak_t, peak_t + YAMNET_WIN_S, funny))
     return moments
 
 
@@ -517,7 +536,7 @@ def write_fcpxml(path: Path, project_name: str, moments: list[Moment], fps: int,
 {chr(10).join(res)}
   </resources>
   <library>
-    <event name="OBS Highlights">
+    <event name="Auto Clip Compiler">
       <project name="{_xml_escape(project_name)}">
         <sequence format="r1" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
           <spine>
@@ -639,6 +658,29 @@ def detect_all(clips: list[Path], args, tmp_root: Path) -> list[ClipInfo]:
     return results
 
 
+def probe_all(clips: list[Path], args) -> list[ClipInfo]:
+    """--all-games: skip game detection AND sorting entirely. Read every clip straight from
+    source (non-destructive) so laughter detection considers ALL of them regardless of game.
+    copied_path -> the source path, so the rest of the pipeline (audio, boundaries, render,
+    fcpxml) works unchanged and nothing is copied."""
+    def _probe(c: Path) -> ClipInfo:
+        info = ClipInfo(path=c, game="All", copied_path=c, confidence=1.0, conf_label="all-games")
+        try:
+            info.duration, info.fps, info.width, info.height = ffprobe_meta(c, args.ffprobe)
+        except Exception as e:
+            info.error = f"probe: {e}"
+        return info
+
+    infos: list[ClipInfo] = []
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(_probe, c): c for c in clips}
+        for fut in tqdm(as_completed(futs), total=len(futs), desc="Probing clips", unit="clip"):
+            infos.append(fut.result())
+    order = {c: i for i, c in enumerate(clips)}
+    infos.sort(key=lambda r: order.get(r.path, 0))
+    return infos
+
+
 def print_detection_table(infos: list[ClipInfo]) -> None:
     print()
     print(f"{'CLIP':<42} {'RUST':>7} {'CS2':>7} {'CONF':>6} {'DECISION':>10}")
@@ -696,11 +738,13 @@ def process_laughter(infos: list[ClipInfo], args, tmp_root: Path) -> list[Moment
         try:
             data = read_wav(wav)
             for (s, e, score) in find_moments(data, laugh_idx, args.laugh_threshold,
-                                              args.energy_percentile):
+                                              args.energy_percentile,
+                                              ensure_one=getattr(args, "every_clip", False)):
                 all_moments.append(Moment(clip=info, laugh_start=s, laugh_end=e, funny_score=score))
         except Exception as ex_:
-            log.warning("Laughter detection failed for %s: %s", info.copied_path.name, ex_)
-    log.info("Found %d laughter moments across %d clips.", len(all_moments), len(wavs))
+            log.warning("Moment detection failed for %s: %s", info.copied_path.name, ex_)
+    label = "candidate" if getattr(args, "every_clip", False) else "laughter"
+    log.info("Found %d %s moments across %d clips.", len(all_moments), label, len(wavs))
     return all_moments
 
 
@@ -957,9 +1001,23 @@ def check_binaries(args) -> None:
         if shutil.which(tool) is None and not Path(tool).exists():
             sys.exit(f"ERROR: '{tool}' not found. Install ffmpeg (winget install Gyan.FFmpeg) "
                      f"or pass {flag} <path>.")
-    if args.tesseract_path:
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = args.tesseract_path
+    # Tesseract OCR powers game detection. Resolve it from --tesseract-path, then PATH,
+    # then the standard Windows install dir. Warn loudly if missing: without OCR every
+    # clip silently classifies as OTHER and is skipped (zero highlights, no error).
+    import pytesseract
+    cand = args.tesseract_path
+    if not cand and shutil.which("tesseract") is None:
+        for p in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                  r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"):
+            if Path(p).exists():
+                cand = p
+                break
+    if cand:
+        pytesseract.pytesseract.tesseract_cmd = cand
+    if not ((cand and Path(cand).exists()) or shutil.which("tesseract") is not None):
+        log.warning("Tesseract OCR not found (PATH, --tesseract-path, or standard install "
+                    "dir). Game detection will mark EVERY clip OTHER and skip it. Install it "
+                    "(winget install UB-Mannheim.TesseractOCR) or pass --tesseract-path <exe>.")
 
 
 # --------------------------------------------------------------------------------------
@@ -967,8 +1025,9 @@ def check_binaries(args) -> None:
 # --------------------------------------------------------------------------------------
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Auto-assemble funny-moment highlight drafts from OBS clips (non-destructive).")
-    p.add_argument("--source", default=DEFAULT_SOURCE, help="OBS clips folder (read-only).")
+        description="Auto Clip Compiler - assemble funny-moment highlight reels from a folder "
+                    "of clips (non-destructive).")
+    p.add_argument("--source", default=DEFAULT_SOURCE, help="Clips folder (read-only).")
     p.add_argument("--output", default=DEFAULT_OUTPUT, help="Working/output folder.")
     p.add_argument("-n", "--top", type=int, default=20, help="Number of top moments (default 20).")
     p.add_argument("--min-dur", type=float, default=5.0, help="Min clip length, s (default 5).")
@@ -1015,6 +1074,17 @@ def parse_args(argv=None):
                         "from stdout (e.g. your Cline/Ollama wrapper).")
     p.add_argument("--llm-timeout", type=float, default=120.0, help="LLM call timeout, seconds.")
     # --- selection & ordering ---
+    p.add_argument("--all-games", action="store_true",
+                   help="Skip game detection/sorting entirely: search EVERY clip (all games, "
+                        "incl. what would be OTHER) for funny moments and compile them together. "
+                        "Reads from source (no copying). Use --combine for one mixed video.")
+    p.add_argument("--every-clip", action="store_true",
+                   help="Treat EVERY clip as a candidate, not just ones with detected laughter: "
+                        "clips with no laugh get a window on their loudest beat. Best for "
+                        "hand-curated clip libraries. Implies --all-games + --smart-rank and "
+                        "judges all clips; keeps silent/visual clips (a transcript judge can't "
+                        "rate them — trust your curation) plus spoken clips scoring >= "
+                        "--min-score (default 3 in this mode).")
     p.add_argument("--min-score", type=float, default=None, metavar="X",
                    help="Include EVERY moment scoring >= X instead of just the top -n. "
                         "With --smart-rank this is the 1-10 LLM clip-worthiness score "
@@ -1044,6 +1114,16 @@ def main(argv=None):
     setup_logging(out)
     check_binaries(args)
 
+    # --every-clip is the curated-library mode: consider every clip, judge everything.
+    if args.every_clip:
+        args.all_games = True
+        args.smart_rank = True
+        args.smart_pool = 0          # judge ALL candidates, not just the top of the pool
+        if args.min_score is None:
+            args.min_score = 3.0
+        log.info("--every-clip: every clip is a candidate; judging all, keeping silent/visual "
+                 "clips + spoken clips scoring >= %.1f.", args.min_score)
+
     tmp_root = out / ".tmp"
     tmp_root.mkdir(parents=True, exist_ok=True)
 
@@ -1067,12 +1147,15 @@ def main(argv=None):
         print("Pre-flight only. Re-run without --preflight to process the full batch.")
         return
 
-    # ---- Phase B: detect all ----
-    infos = detect_all(clips, args, tmp_root)
-    print_detection_table(infos)
-
-    # ---- Phase C: sort copies (source never touched) ----
-    sort_copies(infos, out)
+    # ---- Phase B/C: detect + sort, OR (--all-games) probe everything and skip sorting ----
+    if args.all_games:
+        infos = probe_all(clips, args)
+        log.info("--all-games: searching ALL %d clips for funny moments (no game sorting, "
+                 "no copying; reads from source).", len(infos))
+    else:
+        infos = detect_all(clips, args, tmp_root)
+        print_detection_table(infos)
+        sort_copies(infos, out)
 
     # ---- Phase D: laughter ----
     moments = process_laughter(infos, args, tmp_root)
@@ -1106,9 +1189,22 @@ def main(argv=None):
         # fall back to laughter score, so a 1-10 threshold excludes them (intended).
         def _score(m: Moment) -> float:
             return m.llm_score if m.llm_score is not None else m.funny_score
-        top = [m for m in ranked if _score(m) >= args.min_score]
-        log.info("Selected %d of %d moments scoring >= %.1f (%s).", len(top), len(ranked),
-                 args.min_score, "LLM score" if args.smart_rank else "laughter score")
+
+        def _silent(m: Moment) -> bool:
+            t = (m.transcript or "").strip().lower()
+            return len(t) < 15 or t.startswith("(no speech")
+
+        if args.every_clip:
+            # A transcript judge is blind to silent/visual humor — keep those clips (you
+            # already curated them) and only drop clips whose SPOKEN content scored low.
+            top = [m for m in ranked if _silent(m) or _score(m) >= args.min_score]
+            kept_silent = sum(1 for m in top if _silent(m))
+            log.info("Selected %d of %d moments (every-clip: %d kept as silent/visual, the "
+                     "rest spoken score >= %.1f).", len(top), len(ranked), kept_silent, args.min_score)
+        else:
+            top = [m for m in ranked if _score(m) >= args.min_score]
+            log.info("Selected %d of %d moments scoring >= %.1f (%s).", len(top), len(ranked),
+                     args.min_score, "LLM score" if args.smart_rank else "laughter score")
     else:
         top = ranked[: args.top]
         log.info("Selected top %d of %d moments (after de-dup).", len(top), len(moments))

@@ -1,134 +1,199 @@
-# obs-highlights
+# Auto Clip Compiler
 
-Auto-assemble funny-moment highlight drafts from a folder of OBS replay-buffer clips.
+Turn a folder of game clips into ranked **funny-moment highlight reels** — automatically.
 
-**Rule #0 — non-destructive.** Your source OBS folder is the master copy and is *never* modified,
-moved, or deleted. The tool only ever **copies**. All output goes to a separate working folder.
+Works on **any file-based clips** (OBS replay buffer, ShadowPlay, screen recordings, etc.). It finds
+the funny moments by laughter (and optionally by what's *said*, using an LLM judge), trims each to a
+clean in/out point, and exports rendered MP4 compilations plus DaVinci-Resolve timelines.
 
-## What it does
-1. **Detect the game visually** — clips have no game info in the filename. Samples several frames per
-   clip (spread across the whole video, not just the middle) and identifies **Rust** vs **CS2** with
-   Tesseract OCR on HUD/UI text plus a colour-palette heuristic. Other games are left in the source
-   folder, untouched and unprocessed.
-2. **Sort copies** into `Rust/`, `CS2/`, `Unsorted/` (anything that looks like Rust/CS2 but can't be
-   confidently called goes to `Unsorted/` for you to sort by hand — it never guesses).
-3. **Find funny moments by laughter** — YAMNet (TensorFlow Hub) laughter detection, gated by audio
-   energy so quiet false positives are dropped. Each moment gets a *funny score*.
-4. **Rank** every moment and keep the **top N** (default 20).
-5. **Silence-aware boundaries** — in/out points snap to natural conversational pauses
-   (ffmpeg `silencedetect`), clamped to min/max, erring toward *including more* so setups aren't chopped.
-6. **DaVinci Resolve timelines** — with `--resolve`, writes FCPXML files you import into Resolve.
-7. **Manifest CSV** — your editing shot-list: filename, game, confidence, funny score, in/out times.
+**Rule #0 — non-destructive.** Your source folder is the master copy and is *never* modified, moved, or
+deleted. The tool only ever **copies** (and in `--all-games` / `--every-clip` it reads from source
+without copying at all). All output goes to a separate folder.
 
-## Setup (Windows / PowerShell)
+---
+
+## Quick start
+
+```powershell
+# 1. one-time external tools
+winget install Gyan.FFmpeg
+winget install UB-Mannheim.TesseractOCR
+
+# 2. one-time Python setup (from this folder, in a NEW PowerShell)
+./setup.ps1
+
+# 3. sanity-check, then run
+.\.venv\Scripts\python.exe autoclip.py --preflight 8 --source "D:\Clips"
+.\.venv\Scripts\python.exe autoclip.py --source "D:\Clips" --output "D:\Highlights" --resolve --render --combine
+```
+
+---
+
+## Setup guide (Windows / PowerShell)
+
+> Linux/macOS work too — the only Windows-specific bits are the `winget` installs and the `.ps1`
+> helper. Install ffmpeg/tesseract via your package manager and create the venv manually.
 
 ### 1. External tools (one-time)
 ```powershell
-winget install Gyan.FFmpeg
-winget install UB-Mannheim.TesseractOCR
+winget install Gyan.FFmpeg              # provides ffmpeg + ffprobe
+winget install UB-Mannheim.TesseractOCR # OCR for game detection (skippable if you only use --all-games)
 ```
-Open a **new** PowerShell afterwards so `ffmpeg`, `ffprobe`, and `tesseract` are on `PATH`.
-(If they aren't, pass `--ffmpeg`, `--ffprobe`, `--tesseract-path` explicitly.)
+**Open a new PowerShell window afterward** so `ffmpeg`, `ffprobe`, and `tesseract` are on `PATH`.
+The tool also auto-finds Tesseract at its default install path; otherwise pass
+`--tesseract-path "C:\Program Files\Tesseract-OCR\tesseract.exe"`.
 
 ### 2. Python environment
+Needs **Python 3.10–3.12** (TensorFlow on Windows does **not** support 3.13/3.14).
 ```powershell
-cd C:\Users\<user>\Documents\coding\obs-highlights
+cd <this folder>
 ./setup.ps1
 ```
-This creates `.venv` (Python 3.11 recommended) and installs the Python deps. TensorFlow on Windows is
-**CPU-only** — that's fine for YAMNet at this scale. The first laughter run downloads the YAMNet model.
+`setup.ps1` finds a compatible Python, creates `.venv`, and installs dependencies from
+`requirements.txt`. TensorFlow runs **CPU-only** on Windows — fine for this workload. The first run
+downloads the YAMNet laughter model (~17 MB); `--smart-rank` additionally downloads a faster-whisper
+model on first use.
 
-## Usage
-
-Always start by sanity-checking game detection on a sample (nothing is copied):
+Manual alternative:
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python highlights.py --preflight 8
-```
-Confirm the Rust/CS2 column looks right. If detection is weak, tune `--conf-threshold`,
-`--other-floor`, or `--frames` and re-run the pre-flight.
-
-Full run (top 20, write Resolve timelines + a combined one):
-```powershell
-python highlights.py --resolve --combine
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Common options:
+### 3. (Optional) LLM judge for content-aware ranking
+`--smart-rank` transcribes each candidate and has an LLM rate it 1–10 for clip-worthiness. Pick one:
+
+- **Free, via the Cline CLI (DeepSeek V4 Flash)** — no GPU, no cost on a Cline account:
+  ```powershell
+  npm i -g cline      # then run `cline` once to sign in
+  ```
+  Use it with `--smart-rank --llm-command "python cline_judge.py"`.
+- **A paid API** (DeepSeek/OpenAI-compatible) — set `$env:DEEPSEEK_API_KEY` and use `--smart-rank`.
+- **Local Ollama** — `--smart-rank --llm-base-url http://localhost:11434/v1 --llm-model <model> --llm-api-key ollama`.
+
+---
+
+## How it works
+
+1. **Discover** clips in the read-only source folder.
+2. **Game detection** (default) — samples frames per clip and uses Tesseract OCR on HUD text to sort
+   **Rust** vs **CS2** (others → `OTHER`, left alone). Skip this entirely with `--all-games`.
+3. **Find candidate moments** — YAMNet laughter detection, gated by audio energy. With `--every-clip`,
+   clips with *no* laughter still get a window on their loudest beat (so silent/visual gags count).
+4. **Rank** — by laughter, or with `--smart-rank` by an LLM's clip-worthiness score (1–10).
+5. **Select** — the top `-n`, or *everything* above `--min-score`.
+6. **Trim** — snap in/out points to natural pauses (`silencedetect`), erring toward keeping the setup.
+7. **Export** — `manifest.csv` shot-list, `--resolve` FCPXML timelines, `--render` MP4 compilations.
+
+---
+
+## Usage modes
+
+### Sorted by game (default)
+Best for libraries of mostly Rust/CS2. Sorts copies and makes per-game + combined reels.
 ```powershell
-python highlights.py `
-  --source "C:\Users\<user>\Videos\OBS Clips" `
-  --output "C:\Users\<user>\Videos\Highlights" `
-  -n 20 --min-dur 5 --max-dur 30 `
-  --frames 4 --silence-db -30 --silence-dur 0.3 `
-  --resolve --combine
+.\.venv\Scripts\python.exe autoclip.py --source "D:\Clips" --output "D:\Out" `
+  -n 30 --smart-rank --llm-command "python cline_judge.py" --resolve --render --combine
 ```
-Run `python highlights.py --help` for the full list.
+
+### All games, one mixed reel (`--all-games`)
+Skips game detection/sorting — searches every clip and compiles one video. Reads from source (no
+copying). Good for mixed-game libraries.
+```powershell
+.\.venv\Scripts\python.exe autoclip.py --source "D:\Clips" --output "D:\Out" `
+  --all-games --smart-rank --llm-command "python cline_judge.py" `
+  --min-score 6 --chronological --render --combine
+```
+
+### Every clip (`--every-clip`) — for hand-curated libraries
+If you *already* hand-pick funny clips, laughter detection throws most of them away. `--every-clip`
+treats **every** clip as a candidate (clips with no laugh get a window on their loudest beat), judges
+them all, and **keeps the silent/visual ones** (a transcript judge can't score them, so it trusts your
+curation) plus spoken clips scoring ≥ `--min-score` (default **3** in this mode). Implies `--all-games`
+and `--smart-rank`.
+```powershell
+.\.venv\Scripts\python.exe autoclip.py --source "D:\Clips" --output "D:\Out" `
+  --every-clip --llm-command "python cline_judge.py" `
+  --min-score 3 --chronological --render --combine
+```
+
+> **Heads-up on scale:** `--every-clip` transcribes *every* clip (slow on CPU — budget time for big
+> libraries), and a thousand clips can mean a multi-hour video. Raise `--min-score` to tighten it.
+
+### Ordering
+By default the compilation is funniest-first. Add `--chronological` to order it by recording time
+(oldest first), parsed from the clip filenames.
+
+Run `python autoclip.py --help` for every option.
+
+---
+
+## Smart re-ranking (`--smart-rank`)
+
+By default moments are ranked by laughter loudness. `--smart-rank` adds a content pass: transcribe each
+candidate with **faster-whisper**, then an **LLM** scores it 1–10 for clip-worthiness (judging *what was
+said* + the laughter). The `transcript` and `llm_score` land in `manifest.csv`. Any failure falls back
+to laughter ranking — it never crashes the run.
+
+Three ways to wire the judge:
+
+```powershell
+# A) Free via the Cline CLI (DeepSeek V4 Flash) — uses cline_judge.py in this repo
+python autoclip.py --smart-rank --llm-command "python cline_judge.py"
+#    override model: $env:CLINE_JUDGE_MODEL = "deepseek/deepseek-v4-flash"
+
+# B) OpenAI-compatible HTTP endpoint (DeepSeek's own API, OpenRouter, ...)
+$env:DEEPSEEK_API_KEY = "sk-..."
+python autoclip.py --smart-rank --llm-model deepseek-chat   # base-url defaults to api.deepseek.com
+
+# C) Any CLI (e.g. Ollama) — prompt piped to stdin, JSON read from stdout
+python autoclip.py --smart-rank --llm-command "ollama run llama3.1:8b"
+```
+
+Knobs: `--whisper-model` (tiny/base/small/medium), `--smart-pool` (how many candidates to judge,
+`0` = all), `--smart-batch` (moments per LLM call), `--llm-timeout`.
+
+> **Limitation — visual humor.** The judge only reads the *transcript*; it can't *see* the screen. A
+> silent visual gag scores low on dialogue, which is why `--every-clip` deliberately keeps un-transcribed
+> clips instead of dropping them. True visual-funny detection would need a vision model (not included).
+
+---
 
 ## DaVinci Resolve import (free version)
-External Python scripting requires Resolve **Studio**; the free version rejects external connections.
-So this tool exports **FCPXML** instead, which the free version imports cleanly and non-destructively:
 
-1. Run with `--resolve` (optionally `--combine`). You'll get `Rust.fcpxml`, `CS2.fcpxml`,
-   and optionally `Combined.fcpxml` in the output folder.
+External scripting needs Resolve **Studio**; the free version rejects it. So this tool exports
+**FCPXML**, which the free version imports cleanly and non-destructively:
+
+1. Run with `--resolve` (optionally `--combine`) → `Rust.fcpxml`, `CS2.fcpxml`, `Combined.fcpxml`.
 2. In Resolve: **File ▸ Import ▸ Timeline…**, pick the `.fcpxml`.
-3. Clips are laid out best-first by funny score with the silence-aware in/out points.
-   They reference the **copied** clips read-only — refine the edit however you like.
+3. Clips are laid out with the silence-aware in/out points, referencing the source read-only.
+
+Prefer a finished video? `--render` writes ready-to-watch MP4s directly (no Resolve needed).
+
+---
 
 ## Output layout
 ```
 <output>\
-  Rust\  CS2\  Unsorted\     # sorted COPIES (originals stay in source)
-  audio\                     # 16 kHz mono wavs (safe to delete)
-  manifest.csv               # the shot-list
+  Rust\  CS2\  Unsorted\         # sorted COPIES (default mode only; originals stay in source)
+  audio\                         # 16 kHz mono wavs (cache; safe to delete)
+  manifest.csv                   # the shot-list: filename, game, scores, transcript, in/out
   Rust.fcpxml  CS2.fcpxml  [Combined.fcpxml]
+  Rust_highlights.mp4  CS2_highlights.mp4  [Combined_highlights.mp4]   # with --render
   run.log
 ```
+Rendered MP4s use **fixed names** and are overwritten each run — rename or change `--output` to keep
+old versions.
 
-## Smart re-ranking (optional `--smart-rank`)
-By default moments are ranked purely by laughter loudness/intensity. `--smart-rank` adds a content
-pass: it transcribes each candidate moment with **faster-whisper** and asks an **LLM** to score it 1–10
-for clip-worthiness (judging *what was said* + the laughter), then ranks by that. Laughter becomes one
-signal among several. The `transcript` and `llm_score` land in `manifest.csv`. Any failure falls back to
-laughter ranking — it never crashes the run.
-
-The judge is provider-agnostic — two ways to wire it:
-
-**A) OpenAI-compatible HTTP endpoint** (DeepSeek, OpenRouter, Ollama, …):
-```powershell
-# DeepSeek's own API (cheap):
-$env:DEEPSEEK_API_KEY = "sk-..."
-python highlights.py --smart-rank --llm-model deepseek-chat   # base-url defaults to api.deepseek.com
-
-# A FREE model via OpenRouter:
-$env:OPENAI_API_KEY = "sk-or-..."
-python highlights.py --smart-rank `
-  --llm-base-url https://openrouter.ai/api/v1 `
-  --llm-model "deepseek/deepseek-chat-v3.1:free"
-```
-
-**B) Free via the Cline CLI (DeepSeek V4 Flash)** — uses the `cline_judge.py` bridge in this repo, which
-forwards each batch to the Cline CLI (hosted, free on a Cline account, no GPU). cline must be installed
-and signed in.
-```powershell
-python highlights.py --smart-rank --llm-command "python cline_judge.py"
-# override model:  $env:CLINE_JUDGE_MODEL = "deepseek/deepseek-v4-flash"
-```
-
-**C) Any other CLI** (Ollama, etc.) — `--llm-command` pipes the prompt to the command's **stdin** and
-reads the reply (with the JSON array) from **stdout**:
-```powershell
-python highlights.py --smart-rank --llm-command "ollama run llama3.1:8b"
-```
-(Local Ollama also works via mode A: `--llm-base-url http://localhost:11434/v1 --llm-model <model> --llm-api-key ollama`.)
-
-Knobs: `--whisper-model` (tiny/base/small/medium), `--smart-pool` (how many candidates to transcribe+judge,
-default 150), `--smart-batch` (moments per LLM call), `--llm-timeout`.
+---
 
 ## Tuning notes
-- **Game detection** leans on OCR keywords (`RUST_KEYWORDS` / `CS2_KEYWORDS` in `highlights.py`) plus a
-  colour heuristic. If a real Rust/CS2 clip lands in `OTHER`, lower `--other-floor`; if too many clips
-  are `Unsorted`, lower `--conf-threshold`.
-- **Laughter sensitivity** — raise `--laugh-threshold` for fewer/cleaner hits, lower for more.
-  `--energy-percentile` controls how loud a moment must be to count. `--wide-laughter` also counts
-  Snicker/Belly-laugh/Baby-laughter classes.
-- Clips with no detected laughter or no confident game are skipped and logged — the batch never crashes.
+- **Game detection** — if a real Rust/CS2 clip lands in `OTHER`, lower `--other-floor`; too many
+  `Unsorted`, lower `--conf-threshold`. Or sidestep it with `--all-games`.
+- **Laughter sensitivity** — lower `--laugh-threshold` for more (quieter) hits, raise for cleaner ones;
+  `--energy-percentile` sets how loud a moment must be; `--wide-laughter` adds Snicker/Belly/Baby-laugh
+  classes.
+- **Bigger reels** — `--all-games` (include every game) and `--every-clip` (include every clip) both
+  widen the funnel; `--min-score` controls the quality bar.
+- Clips with no detected moment (default mode) or that fail to process are skipped and logged — the
+  batch never crashes.
