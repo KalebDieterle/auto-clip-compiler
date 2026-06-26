@@ -106,13 +106,20 @@ python highlights.py --smart-rank `
   --llm-model "deepseek/deepseek-chat-v3.1:free"
 ```
 
-**B) Any CLI** (your Cline/Ollama/etc.) — pipe the prompt to its stdin, read the reply from stdout:
+**B) Free via the Cline CLI (DeepSeek V4 Flash)** — uses the `cline_judge.py` bridge in this repo, which
+forwards each batch to the Cline CLI (hosted, free on a Cline account, no GPU). cline must be installed
+and signed in.
 ```powershell
-python highlights.py --smart-rank --llm-command "ollama run deepseek-r1"
+python highlights.py --smart-rank --llm-command "python cline_judge.py"
+# override model:  $env:CLINE_JUDGE_MODEL = "deepseek/deepseek-v4-flash"
 ```
-The command must accept the prompt on **stdin** and print the model's reply (containing the JSON array)
-on **stdout**. Note: an interactive agent like Cline is a clumsy fit here — prefer mode A with a free
-OpenRouter model if you can.
+
+**C) Any other CLI** (Ollama, etc.) — `--llm-command` pipes the prompt to the command's **stdin** and
+reads the reply (with the JSON array) from **stdout**:
+```powershell
+python highlights.py --smart-rank --llm-command "ollama run llama3.1:8b"
+```
+(Local Ollama also works via mode A: `--llm-base-url http://localhost:11434/v1 --llm-model <model> --llm-api-key ollama`.)
 
 Knobs: `--whisper-model` (tiny/base/small/medium), `--smart-pool` (how many candidates to transcribe+judge,
 default 150), `--smart-batch` (moments per LLM call), `--llm-timeout`.
