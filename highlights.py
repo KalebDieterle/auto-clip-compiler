@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
 import logging
 import os
@@ -558,6 +559,34 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{mm:02d}:{ss:06.3f}"
 
 
+# OBS replay names embed the recording time, e.g. "Replay 2026-06-12 22-05-47.mp4",
+# "Counter-Strike 2 - 2026-01-13 6-39-28 PM.mp4", "2026-02-11 00-38-37.mp4".
+_TS_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})[ _T-]+(\d{1,2})-(\d{2})-(\d{2})\s*(AM|PM)?", re.I)
+
+
+def clip_timestamp(clip: ClipInfo) -> float:
+    """Recording time as a sortable epoch float, for chronological ordering.
+    Parse the OBS-style date/time out of the filename (handles optional AM/PM);
+    fall back to the file's modification time if the name has no timestamp."""
+    m = _TS_RE.search(clip.path.name)
+    if m:
+        y, mo, d, hh, mm, ss, ap = m.groups()
+        hour = int(hh)
+        if ap:
+            if ap.upper() == "PM" and hour != 12:
+                hour += 12
+            elif ap.upper() == "AM" and hour == 12:
+                hour = 0
+        try:
+            return datetime.datetime(int(y), int(mo), int(d), hour, int(mm), int(ss)).timestamp()
+        except ValueError:
+            pass
+    try:
+        return clip.path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
@@ -985,6 +1014,15 @@ def parse_args(argv=None):
                    help="Instead of HTTP: pipe the prompt to this CLI's stdin and read JSON "
                         "from stdout (e.g. your Cline/Ollama wrapper).")
     p.add_argument("--llm-timeout", type=float, default=120.0, help="LLM call timeout, seconds.")
+    # --- selection & ordering ---
+    p.add_argument("--min-score", type=float, default=None, metavar="X",
+                   help="Include EVERY moment scoring >= X instead of just the top -n. "
+                        "With --smart-rank this is the 1-10 LLM clip-worthiness score "
+                        "(e.g. 6); without it, the 0-1 laughter score. Overrides -n. "
+                        "Tip: also raise --smart-pool (or set 0) so all candidates get judged.")
+    p.add_argument("--chronological", action="store_true",
+                   help="Order the compilation by recording time (oldest first), parsed "
+                        "from the clip filenames, instead of funniest-first.")
     p.add_argument("--preflight", nargs="?", type=int, const=8, default=None, metavar="K",
                    help="Game-detect the first K clips (default 8), print results, and exit.")
     p.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 1),
@@ -1043,10 +1081,11 @@ def main(argv=None):
         write_manifest(out / "manifest.csv", [])
         return
 
-    # ---- Phase E: rank. Take an oversized candidate window, snap boundaries, de-dup
-    #      overlapping moments from the same clip, THEN trim to top N. ----
+    # ---- Phase E: rank. Snap boundaries, judge, de-dup overlapping moments from the
+    #      same clip, THEN select. In threshold ("all funny") mode every laughter moment
+    #      is a candidate so nothing funny is cut by an arbitrary top-N window. ----
     moments.sort(key=lambda m: m.funny_score, reverse=True)
-    candidates = moments[: max(args.top * 3, args.top)]
+    candidates = list(moments) if args.min_score is not None else moments[: max(args.top * 3, args.top)]
 
     # ---- Phase F: silence-aware boundaries (on candidates) ----
     assign_boundaries(candidates, args)
@@ -1059,8 +1098,25 @@ def main(argv=None):
         candidates.sort(key=lambda m: (m.llm_score is not None, m.llm_score or 0.0,
                                        m.funny_score), reverse=True)
 
-    top = dedup_moments(candidates)[:args.top]
-    log.info("Selected top %d of %d moments (after de-dup).", len(top), len(moments))
+    ranked = dedup_moments(candidates)
+
+    # ---- Selection: keep everything above a funniness threshold, OR the top N. ----
+    if args.min_score is not None:
+        # LLM 1-10 score when judging; else the 0-1 laughter score. Unjudged moments
+        # fall back to laughter score, so a 1-10 threshold excludes them (intended).
+        def _score(m: Moment) -> float:
+            return m.llm_score if m.llm_score is not None else m.funny_score
+        top = [m for m in ranked if _score(m) >= args.min_score]
+        log.info("Selected %d of %d moments scoring >= %.1f (%s).", len(top), len(ranked),
+                 args.min_score, "LLM score" if args.smart_rank else "laughter score")
+    else:
+        top = ranked[: args.top]
+        log.info("Selected top %d of %d moments (after de-dup).", len(top), len(moments))
+
+    # ---- Ordering: chronological by recording time, or funniest-first (default). ----
+    if args.chronological:
+        top.sort(key=lambda m: (clip_timestamp(m.clip), m.in_t))
+        log.info("Ordered %d moments chronologically (oldest recording first).", len(top))
 
     # ---- Phase G: manifest ----
     write_manifest(out / "manifest.csv", top)
