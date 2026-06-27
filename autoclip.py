@@ -606,6 +606,26 @@ def clip_timestamp(clip: ClipInfo) -> float:
         return 0.0
 
 
+def overlay_label(clip: ClipInfo) -> str:
+    """Human-readable recording time for the burn-in overlay, e.g. '2026-06-12 10:05 PM'."""
+    dt = datetime.datetime.fromtimestamp(clip_timestamp(clip))
+    return dt.strftime("%Y-%m-%d %I:%M %p")
+
+
+def _drawtext_filter(label: str, height: int, ffmpeg_font: str) -> str:
+    """Build a drawtext filter that puts `label` in a boxed caption, bottom-left.
+
+    The text is single-quoted so spaces are literal; colons still need escaping (drawtext
+    re-splits on ':' after the filtergraph pass) and the fontfile's drive colon needs a
+    doubled backslash to survive both unescaping passes.
+    """
+    safe = label.replace("\\", "\\\\").replace("'", r"\'").replace(":", r"\:")
+    fontsize = max(16, height // 30)
+    return (f"drawtext=fontfile={ffmpeg_font}:text='{safe}':fontcolor=white:"
+            f"fontsize={fontsize}:box=1:boxcolor=black@0.5:boxborderw={fontsize // 3}:"
+            f"x={fontsize}:y=h-th-{fontsize}")
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
@@ -930,15 +950,21 @@ def render_videos(moments: list[Moment], args) -> list[Path]:
     h = args.render_height
     w = int(round(h * 16 / 9 / 2) * 2)   # 16:9, even width
     fps = args.fps
+    # ffmpeg drawtext needs a fontfile on Windows (no fontconfig). The drive colon must
+    # survive two levels of filtergraph unescaping, so it needs a doubled backslash.
+    ffmpeg_font = "C\\\\:/Windows/Fonts/arial.ttf"
 
     def encode(idx: int, m: Moment) -> Path | None:
         src = m.clip.copied_path or m.clip.path
         seg = tmp / f"seg_{idx:03d}.mp4"
         dur = max(0.1, m.out_t - m.in_t)
+        vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+              f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}")
+        if getattr(args, "timestamp_overlay", False):
+            vf += "," + _drawtext_filter(overlay_label(m.clip), h, ffmpeg_font)
         cp = run([
             args.ffmpeg, "-y", "-i", str(src), "-ss", f"{m.in_t:.3f}", "-t", f"{dur:.3f}",
-            "-vf", (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}"),
+            "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(seg),
         ])
@@ -1052,6 +1078,9 @@ def parse_args(argv=None):
                    help="Output height for rendered MP4s (16:9, default 1080).")
     p.add_argument("--combine", action="store_true",
                    help="Also write a single combined timeline/video across both games.")
+    p.add_argument("--timestamp-overlay", action="store_true",
+                   help="Burn each clip's recording time (from its filename) into the rendered "
+                        "video, bottom-left. Handy for spotting which moments to cut.")
     p.add_argument("--redetect", action="store_true",
                    help="Force fresh game detection even if clips were sorted on a prior run.")
     # --- smart re-ranking (optional): transcript + LLM clip-worthiness judge ---
