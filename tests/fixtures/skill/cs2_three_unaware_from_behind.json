@@ -1,0 +1,53 @@
+{
+ "game": "cs2",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 1,
+    "headshot": "yes",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "one_tap",
+    "special": []
+   },
+   {
+    "t": 2,
+    "headshot": "yes",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "one_tap",
+    "special": []
+   },
+   {
+    "t": 3,
+    "headshot": "yes",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "one_tap",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 2,
+   "enemies_alive": 2,
+   "low_hp": false,
+   "round_decisive": false,
+   "outnumbered": false,
+   "enemies_aware": false
+  },
+  "penalty_flags": [
+   "enemy_unaware"
+  ],
+  "evidence": "fixture",
+  "holistic_difficulty": 6,
+  "one_liner": "Three backs turned"
+ }
+}

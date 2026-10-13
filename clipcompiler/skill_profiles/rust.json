@@ -1,0 +1,26 @@
+{
+  "name": "rust",
+  "label": "Rust",
+  "weights": {"mechanics": 0.55, "situation": 0.35, "multi": 1.0},
+  "kill": {
+    "headshot": 0.3,
+    "flick": {"none": 0, "small": 0.06, "medium": 0.15, "large": 0.25},
+    "reaction": {"fast": 0.15, "normal": 0.05, "slow": 0, "unclear": 0.03},
+    "range": {"close": 0, "mid": 0.08, "long": 0.2},
+    "target_moving": 0.08,
+    "shots": {"one_tap": 0.12, "burst": 0.05, "spray": 0},
+    "special": {"wallbang": 0.15, "through_smoke": 0.1, "noscope": 0.2, "airborne": 0.15, "blind": 0.15,
+                "collateral": 0.15, "melee": 0.15}
+  },
+  "situation": {
+    "clutch": {"1": 0.2, "2": 0.5, "3": 0.75, "4": 1.0},
+    "low_hp": 0.2, "round_decisive": 0.15, "outnumbered": 0.35, "enemies_aware": 0.1
+  },
+  "multi": {"per_kill": 3, "ramp": 20, "floor": 0.25, "min_credit": 0.85},
+  "penalties": {"enemy_unaware": 0.65, "enemy_pre_damaged": 0.8, "long_spray_many_misses": 0.9,
+                "npc_or_bot": 0.3, "exit_frag": 0.6, "teammate_did_work": 0.75},
+  "blend": {"formula": 0.7, "holistic": 0.3, "quality": 0.9},
+  "gate": {"min_prelim": 4, "max_plays": 3},
+  "panel": {"x": 0.7, "y": 0.7, "w": 0.3, "h": 0.3, "describes": "the bottom-right corner (health, food and water bars)"},
+  "hints": "Rust: there is no kill feed. A headshot has a distinct sharp hit sound and the target drops fast; listen for it. Scientists, bears, wolves and other NPCs or animals count as npc_or_bot. Long-range bow, crossbow or bolt-action headshots are hard. Holding off several attackers at a base, or winning a fight against a group alone, is outnumbered. round_decisive means the fight decided a raid or base defense."
+}

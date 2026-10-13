@@ -13,7 +13,7 @@ from . import paths
 from .gemini import DEFAULT_MODEL
 from .store import atomic_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2: compilation type (funny / skill / both) and skill options.
 KEY_SERVICE, KEY_USER = 'AutoClipCompiler', 'gemini-api-key'
 KEY_SHAPE = re.compile(r'AIza[0-9A-Za-z_\-]{30,}')
 
@@ -37,6 +37,11 @@ class Settings:
     loudnorm: bool = True
     timestamp_overlay: bool = False
     model: str = DEFAULT_MODEL
+    content_mode: str = 'funny'      # 'funny', 'skill' or 'both' (one mixed reel, each moment tagged).
+    min_skill_score: int = 7
+    skill_preset: str = 'balanced'   # 'balanced', 'aim' or 'clutch'.
+    skill_share: float = .4          # Both mode: target fraction of the reel that is skill plays.
+    game_override: str = 'auto'      # 'auto' (detected per clip), 'cs2', 'rust' or 'generic'.
 
     def problems(self):
         checks = [(self.mode in ('reel', 'parts'), 'mode must be reel or parts'),
@@ -47,7 +52,12 @@ class Settings:
                   (self.budget_usd >= 0, 'budget cannot be negative'),
                   (1 <= self.workers <= 8, 'workers must be 1-8'),
                   (self.height in (720, 1080, 1440), 'quality must be 720, 1080 or 1440'),
-                  (self.fps in (30, 60), 'frame rate must be 30 or 60')]
+                  (self.fps in (30, 60), 'frame rate must be 30 or 60'),
+                  (self.content_mode in ('funny', 'skill', 'both'), 'compilation type must be funny, skill or both'),
+                  (1 <= self.min_skill_score <= 10, 'minimum skill score must be 1-10'),
+                  (self.skill_preset in ('balanced', 'aim', 'clutch'), 'skill focus must be balanced, aim or clutch'),
+                  (.1 <= self.skill_share <= .9, 'skill share must be 10-90%'),
+                  (self.game_override in ('auto', 'cs2', 'rust', 'generic'), 'game must be auto, cs2, rust or generic')]
         return [message for ok, message in checks if not ok]
 
 
@@ -81,6 +91,16 @@ def save(settings, path=None):
     if problems: raise ValueError('; '.join(problems))
     path = path or paths.settings_path(); path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(path, asdict(settings))
+
+
+def profiles_dir():
+    """User copies of the skill profiles (optional); a file here overrides the built-in one key by key."""
+    return paths.config_dir()/'skill_profiles'
+
+
+def profiles(settings):
+    from .skill import Profiles
+    return Profiles(settings.skill_preset, settings.game_override, profiles_dir())
 
 
 def cache_dir(settings=None):
@@ -122,15 +142,29 @@ def validate_key(key, model=DEFAULT_MODEL):
     from .gemini import client
     _known_keys.add(key)
     try:
-        client(key).models.get(model=model)
+        gc = client(key)  # Keep a reference: a garbage-collected Client closes its connection mid-call.
+        gc.models.get(model=model)
         return {'ok': True, 'state': 'ok', 'message': 'Key works.'}
     except Exception as exc:
         text = redact(str(exc)); code = getattr(exc, 'code', None)
         if code in (400, 401, 403) or 'api key' in text.lower():
             return {'ok': False, 'state': 'invalid', 'message': 'Google rejected this key. Check it was copied in full.'}
-        if code is None:
+        if code is None and is_network_error(exc):
             return {'ok': False, 'state': 'network', 'message': "Couldn't reach Google. Check your internet connection."}
-        return {'ok': False, 'state': 'error', 'message': text[:300]}
+        logging.getLogger(__name__).warning('key check failed: %s: %s', type(exc).__name__, text)
+        return {'ok': False, 'state': 'error', 'message': text[:300] or type(exc).__name__}
+
+
+def is_network_error(exc):
+    """Connection, DNS, TLS and timeout failures (httpx or stdlib), anywhere in the exception chain."""
+    while exc is not None:
+        name = type(exc).__name__
+        if isinstance(exc, OSError) or name in (
+                'ConnectError', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'NetworkError',
+                'TimeoutException', 'RemoteProtocolError', 'SSLError', 'gaierror'):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 # --- Logging -------------------------------------------------------------------------------------

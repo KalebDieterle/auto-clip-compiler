@@ -15,6 +15,8 @@
   --bad: #ff6464;
   --bad-soft: rgba(255, 100, 100, .13);
   --warn: #ffb547;
+  --skill: #2dd4bf;
+  --skill-soft: rgba(45, 212, 191, .14);
   --shadow: 0 10px 30px rgba(0, 0, 0, .35);
   --radius: 14px;
   --ease: cubic-bezier(.2, .8, .2, 1);
@@ -28,6 +30,7 @@
   :root:not([data-theme="dark"]) {
     --bg: #f4f5f8; --surface: #ffffff; --surface-2: #f0f1f5; --surface-3: #e4e6ec; --line: #dfe2e9;
     --text: #151821; --muted: #5e6475; --faint: #8f95a5; --accent: #5b4bff; --accent-2: #4636e6;
+    --skill: #0d9488; --skill-soft: rgba(13, 148, 136, .1);
     --accent-soft: rgba(91, 75, 255, .1); --shadow: 0 10px 30px rgba(20, 24, 40, .08); color-scheme: light;
   }
 }
@@ -190,10 +193,14 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.2); }
 .scan-stats b { font-size: 22px; font-variant-numeric: tabular-nums; }
 .scan-stats span { color: var(--muted); font-size: 12px; }
 .scan-range { color: var(--muted); font-size: 12.5px; }
-.recent ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.recent li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); cursor: pointer; transition: background var(--fast), transform var(--fast) var(--ease); }
-.recent li:hover { background: var(--surface-3); transform: translateX(2px); }
-.recent li span { color: var(--muted); font-size: 12.5px; }
+.recent ul, .drafts ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.recent li, .drafts li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); cursor: pointer; transition: background var(--fast), transform var(--fast) var(--ease); }
+.recent li:hover, .drafts li:hover { background: var(--surface-3); transform: translateX(2px); }
+.recent li span, .drafts li span { color: var(--muted); font-size: 12.5px; }
+.drafts { max-width: 720px; }
+.drafts li > div { flex: 1; }
+.drafts .discard { display: inline-flex; align-items: center; gap: 6px; }
+.drafts .discard:hover { color: var(--bad, #f87171); }
 .pill { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; background: var(--surface-3); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .pill.review { background: var(--accent-soft); color: var(--accent-2); }
 .pill.rendered { background: var(--good-soft); color: var(--good); }
@@ -349,3 +356,44 @@ video { width: 100%; height: 100%; display: block; background: #000; }
 .bstats span { color: var(--muted); font-size: 12px; }
 .pill.batch_waiting, .pill.batch_uploading { background: rgba(255, 181, 71, .14); color: var(--warn); }
 .pill.cancelled { background: var(--surface-3); color: var(--faint); }
+
+/* Clip picker: day groups of clips with checkboxes, status and a play button. */
+.pick-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.pick-row.picked #pickInfo { color: var(--accent-2); font-weight: 600; }
+.screen[data-screen="pick"] { padding-bottom: 0; gap: 18px; }
+.screen[data-screen="pick"] .tools input[type=text] { width: 190px; padding: 7px 11px; }
+.pick-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 0 2px 30px; }
+.pick-day { flex-shrink: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.pick-day > header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface-2); font-weight: 700; font-size: 13.5px; cursor: pointer; }
+.pick-day > header span { color: var(--muted); font-weight: 600; font-size: 12.5px; margin-left: auto; }
+.pick-clip { display: grid; grid-template-columns: 22px 1fr auto auto auto 30px; align-items: center; gap: 12px; padding: 8px 14px; border-top: 1px solid var(--line); cursor: pointer; font-size: 13px; }
+.pick-clip:hover { background: var(--surface-2); }
+.pick-clip.off .name, .pick-clip.off .time { color: var(--faint); }
+.pick-clip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-clip .time, .pick-clip .size { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.pick-clip .state { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 20px; background: var(--surface-3); color: var(--muted); }
+.pick-clip .state.ready { background: var(--good-soft); color: var(--good); }
+.pick-clip .state.pending { background: rgba(255, 181, 71, .14); color: var(--warn); }
+.pick-clip .state.bad { background: var(--bad-soft); color: var(--bad); }
+.pick-clip .play { width: 28px; height: 28px; border-radius: 8px; border: 0; background: none; color: var(--muted); cursor: pointer; display: grid; place-items: center; }
+.pick-clip .play:hover { background: var(--surface-3); color: var(--text); }
+.pick-clip .play .ic { width: 14px; height: 14px; }
+.pick-day input[type=checkbox], .pick-clip input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+
+/* Skill compilations: lens badges, skill-tinted scores, explanation tags, kill markers. */
+.score.skill { background: rgba(0, 0, 0, .55); box-shadow: inset 0 0 0 1.5px var(--skill); }
+.score.skill.s8 { background: #0f766e; box-shadow: none; }
+.score.skill.s9, .score.skill.s10 { background: linear-gradient(135deg, #22d3ee, #0f766e); box-shadow: none; }
+.thumb .lenses { position: absolute; bottom: 7px; left: 8px; z-index: 1; display: flex; gap: 4px; }
+.badge { font-size: 10.5px; font-weight: 800; letter-spacing: .03em; padding: 2px 7px; border-radius: 20px; text-transform: uppercase; }
+.badge.funny { background: var(--accent); color: #fff; }
+.badge.skill { background: var(--skill); color: #042f2e; }
+.pmeta .lenses { display: inline-flex; gap: 4px; }
+.reason.second { color: var(--muted); font-size: 13px; }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.tag { font-size: 11.5px; font-weight: 700; padding: 3px 8px; border-radius: 6px; background: var(--skill-soft); color: var(--skill); }
+.tag.minus { background: var(--bad-soft); color: var(--bad); }
+.trim-track .kills { position: absolute; inset: 0; pointer-events: none; }
+.trim-track .kills i { position: absolute; top: 3px; bottom: 3px; width: 2px; margin-left: -1px; border-radius: 2px; background: var(--skill); opacity: .9; }
+.chip.skill.hot { background: var(--skill-soft); color: var(--skill); }
+.bstage { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--skill); }

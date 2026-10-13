@@ -1,6 +1,8 @@
 """Judge many clips through the Gemini Batch API (half price, finishes within ~24 h). CLI over clipcompiler.batch.
 
   submit   make 480p proxies, upload them, upload a JSONL of requests, create the batch job
+           (--content skill/both also asks the skill triage question of the same upload)
+  details  skill stage 2, after collecting a skill submit: upload close-ups of the plays triage found
   status   show the job's state
   collect  download results into the shared judgment cache, then delete every upload
   cancel   cancel the job and delete every upload
@@ -16,7 +18,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from clipcompiler import batch, gemini, paths  # noqa: E402
+from clipcompiler import batch, gemini, paths, skill  # noqa: E402
 from clipcompiler.reel import discover  # noqa: E402
 from clipcompiler.store import HashIndex  # noqa: E402
 from gemini_reel import api_key, default_cache  # noqa: E402
@@ -40,27 +42,39 @@ def state_or_exit(job_dir):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='command', required=True)
-    for name in ('submit', 'status', 'collect', 'cancel'):
+    for name in ('submit', 'details', 'status', 'collect', 'cancel'):
         s = sub.add_parser(name); s.add_argument('--job-dir', required=True)
         s.add_argument('--cache', default=None, help="Judgment cache dir (default: the app's cache folder from Settings)")
-        if name == 'submit':
+        if name in ('submit', 'details'):
             s.add_argument('--source', required=True); s.add_argument('--since'); s.add_argument('--until')
             s.add_argument('--max-clips', type=int, default=5000); s.add_argument('--workers', type=int, default=6)
             s.add_argument('--budget-usd', type=float, help='Submit only as many (newest) clips as fit this estimate')
             s.add_argument('--model', default=gemini.DEFAULT_MODEL)
+        if name == 'submit':
+            s.add_argument('--content', choices=('funny', 'skill', 'both'), default='funny')
+        if name == 'details':
+            s.add_argument('--skill-preset', choices=skill.PRESETS, default='balanced')
+            s.add_argument('--game', choices=('auto', 'cs2', 'rust', 'generic'), default='auto')
     args = p.parse_args()
     logging.basicConfig(level=logging.WARNING, format='    %(message)s')
     cache = Path(args.cache or default_cache())
     gc = gemini.client(api_key())  # Keep a reference: a garbage-collected Client closes its connection mid-call.
-    if args.command == 'submit':
+    if args.command in ('submit', 'details'):
         since = datetime.datetime.fromisoformat(args.since).timestamp() if args.since else None
         until = datetime.datetime.fromisoformat(args.until).timestamp() if args.until else None
         clips = discover(args.source, since, until)[:args.max_clips]
         print(f'{len(clips)} clips in range; hashing and skipping already-judged ones...', flush=True)
         hasher = HashIndex(paths.hash_index_path())
         try:
-            state = batch.submit(clips, args.job_dir, cache, gc, model=args.model, hasher=hasher, workers=args.workers,
-                                 max_usd=args.budget_usd, emit=printer)
+            if args.command == 'submit':
+                kinds = {'funny': ('funny',), 'skill': ('triage',), 'both': ('funny', 'triage')}[args.content]
+                state = batch.submit(clips, args.job_dir, cache, gc, model=args.model, hasher=hasher, workers=args.workers,
+                                     max_usd=args.budget_usd, emit=printer, kinds=kinds)
+            else:
+                from clipcompiler import settings as config
+                profiles = skill.Profiles(args.skill_preset, args.game, config.profiles_dir())
+                state = batch.submit_details(clips, args.job_dir, cache, gc, model=args.model, profiles=profiles,
+                                             hasher=hasher, workers=args.workers, max_usd=args.budget_usd, emit=printer)
         finally:
             hasher.save()
         if not state.get('job'): print('Nothing to judge.')

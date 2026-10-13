@@ -1,0 +1,31 @@
+{
+ "game": "cs2",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 3,
+    "headshot": "yes",
+    "flick": "large",
+    "reaction": "fast",
+    "range": "mid",
+    "target_moving": true,
+    "shots": "one_tap",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 2,
+   "enemies_alive": 2,
+   "low_hp": false,
+   "round_decisive": false,
+   "outnumbered": false,
+   "enemies_aware": true
+  },
+  "penalty_flags": [],
+  "evidence": "fixture",
+  "holistic_difficulty": 9,
+  "one_liner": "Huge flick onto a head, one tap"
+ }
+}

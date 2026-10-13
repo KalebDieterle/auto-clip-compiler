@@ -115,6 +115,30 @@ def recording_time(path):
     return path.stat().st_mtime, False
 
 
+WINDOW_SIZE = (1280, 480)   # Composite: zoomed center 854x480 | panel 426x240 over full frame 426x240.
+
+
+def window_filter(panel, fps):
+    """Three views of the same moment side by side, so one upload carries aim detail and context."""
+    x, y, w, h = (panel[k] for k in ('x', 'y', 'w', 'h'))
+    return (f'[0:v]split=3[a][b][c];'
+            f'[a]crop=trunc(iw*0.4/2)*2:trunc(ih*0.4/2)*2:trunc(iw*0.3/2)*2:trunc(ih*0.3/2)*2,scale=854:480,setsar=1[center];'
+            f'[b]crop=trunc(iw*{w}/2)*2:trunc(ih*{h}/2)*2:trunc(iw*{x}/2)*2:trunc(ih*{y}/2)*2,scale=426:240,setsar=1[panel];'
+            f'[c]scale=426:240,setsar=1[full];[panel][full]vstack[right];[center][right]hstack,fps={fps}[out]')
+
+
+def window(path, start, end, panel, directory, ffmpeg='ffmpeg', fps=12, cancel=None):
+    """A short composite clip of [start, end] from the original recording, for the skill close-up.
+    Times inside it start at 0; the caller adds `start` back."""
+    from .store import identity
+    target = Path(directory)/(identity([str(path), start, end, panel, fps])[:16]+'.mp4')
+    command([ffmpeg, '-v', 'error', '-y', '-ss', f'{start:.3f}', '-t', f'{end-start:.3f}', '-i', path,
+             '-filter_complex', window_filter(panel, fps), '-map', '[out]', '-map', '0:a:0?',
+             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+             '-c:a', 'aac', '-b:a', '96k', '-ac', '2', target], timeout=600, cancel=cancel)
+    return target
+
+
 def media_preflight(output, ffmpeg, ffprobe, min_free_gb=2):
     output.mkdir(parents=True, exist_ok=True)
     command([ffmpeg, '-version'], 15)

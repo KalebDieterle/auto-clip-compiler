@@ -5,7 +5,7 @@ const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const S = {
   api: null, state: null, screen: null, seq: 0, busy: null,
-  scan: null, rescan: false, review: null, visible: [], sel: -1, filter: 'all',
+  scan: null, rescan: false, review: null, visible: [], sel: -1, filter: 'all', lens: 'all',
   judge: null, reasons: {}, minScore: 7,
 };
 
@@ -76,7 +76,7 @@ const onEnter = {};
 function go(name) {
   S.screen = name;
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.screen === name));
-  const tab = { judging: 'home', batch: 'review', render: 'review', welcome: null }[name] ?? name;
+  const tab = { judging: 'home', pick: 'home', batch: 'review', render: 'review', welcome: null }[name] ?? name;
   $$('.nav').forEach((n) => n.classList.toggle('on', n.dataset.go === tab));
   $('.rail nav').style.visibility = name === 'welcome' ? 'hidden' : '';
   requestAnimationFrame(() => $$('.screen.on .seg').forEach((el) => seg(el)));
@@ -150,7 +150,7 @@ function handle(e) {
 async function refreshState() {
   S.state = await S.api.get_state();
   $('.nav[data-go="review"]').disabled = !S.state.run;
-  renderRecent();
+  renderRecent(); renderDrafts();
 }
 
 // ---------- onboarding ----------
@@ -207,6 +207,10 @@ async function saveSettings(changes) {
 onEnter.home = () => {
   const s = S.state.settings;
   setFolder($('#srcPick'), s.source); setFolder($('#outPick'), s.output);
+  seg($('#contentMode'), s.content_mode); contentFields(s.content_mode);
+  seg($('#skillPreset'), s.skill_preset); presetHint(s.skill_preset);
+  $('#skillShare').value = Math.round(s.skill_share * 100); shareLabel(); fillRange($('#skillShare'));
+  $('#minSkillScore').value = s.min_skill_score; $('#minSkillScoreOut').textContent = s.min_skill_score; fillRange($('#minSkillScore'));
   seg($('#mode'), s.mode); modeLabels(s.mode);
   seg($('#judgeMode'), s.judge_mode); judgeHint(s.judge_mode);
   $('#length').value = s.mode === 'reel' ? s.target_minutes : s.part_minutes;
@@ -217,6 +221,32 @@ onEnter.home = () => {
   if (s.source && !S.scan && !S.busy) scan();
   updateStart();
 };
+const CONTENT_HINT = {
+  funny: 'Banter, fails, reactions and anything that made you laugh.',
+  skill: 'Your best plays. Scored on how hard they were (flicks, headshots, clutches), not how many kills.',
+  both: 'One video with both. Each moment is tagged Funny or Skill so you can filter in review.',
+};
+const PRESET_HINT = {
+  balanced: 'Aim and situation both count. A flick headshot and a 1v3 clutch score about the same.',
+  aim: 'Mechanics first: flicks, reaction time, headshots, one-taps.',
+  clutch: 'Situation first: winning outnumbered, low on health, or when the round depends on it.',
+};
+function contentFields(mode) {
+  $('#contentHint').textContent = CONTENT_HINT[mode];
+  $$('.skill-only').forEach((el) => { el.hidden = mode === 'funny'; });
+  $$('.both-only').forEach((el) => { el.hidden = mode !== 'both'; });
+  $$('.funny-only').forEach((el) => { el.hidden = mode === 'skill'; });
+  $('#minScoreLabel').textContent = mode === 'both' ? 'Minimum funny score' : 'Minimum score';
+  requestAnimationFrame(() => seg($('#skillPreset')));
+}
+function presetHint(v) { $('#presetHint').textContent = PRESET_HINT[v]; }
+function shareLabel() { const v = Number($('#skillShare').value); $('#skillShareOut').textContent = `${100 - v}% funny · ${v}% skill`; }
+onSeg($('#contentMode'), async (v) => { contentFields(v); await saveSettings({ content_mode: v }); scanStats(); updateStart(); });
+onSeg($('#skillPreset'), async (v) => { presetHint(v); await saveSettings({ skill_preset: v }); });
+$('#skillShare').addEventListener('input', (e) => { shareLabel(); fillRange(e.target); });
+$('#skillShare').addEventListener('change', (e) => saveSettings({ skill_share: Number(e.target.value) / 100 }));
+$('#minSkillScore').addEventListener('input', (e) => { $('#minSkillScoreOut').textContent = e.target.value; fillRange(e.target); });
+$('#minSkillScore').addEventListener('change', (e) => saveSettings({ min_skill_score: Number(e.target.value) }));
 function modeLabels(mode) {
   $('#lengthLabel').textContent = mode === 'reel' ? 'Video length (min)' : 'Part length (min)';
 }
@@ -235,7 +265,7 @@ onSeg($('#mode'), async (v) => {
 });
 const JUDGE_HINT = {
   live: 'Results in minutes while you watch. One video stops judging once it has enough.',
-  batch: 'Half price. Google returns results within 24 hours, often under an hour. Your PC only needs to be on while clips upload. Judges every clip in the range.',
+  batch: 'Half price. Google returns results within 24 hours, often under an hour. Your PC only needs to be on while clips upload. Judges every chosen clip.',
 };
 function judgeHint(v) { $('#judgeHint').textContent = JUDGE_HINT[v]; }
 onSeg($('#judgeMode'), async (v) => { judgeHint(v); await saveSettings({ judge_mode: v }); paintEstimate(); updateStart(); });
@@ -268,31 +298,50 @@ function scanProgress(e) {
 }
 function scanDone(e) {
   S.scan = e; $('#scanBar').hidden = true;
-  if (!e.clips) { $('#scanState').textContent = 'No video files found in this folder for these dates.'; $('#scanStats').hidden = true; updateStart(); return; }
+  if (!e.total) { $('#scanState').textContent = 'No video files found in this folder for these dates.'; $('#scanStats').hidden = true; $('#pickRow').hidden = true; updateStart(); return; }
   $('#scanState').textContent = ''; $('#scanStats').hidden = false;
-  animateNumber($('#sClips'), e.clips); animateNumber($('#sCached'), e.cached); animateNumber($('#sTodo'), e.to_judge);
-  paintEstimate();
-  $('#scanRange').textContent = `${day(e.first)} to ${day(e.last)} · ${e.gb} GB` + (e.unreadable ? ` · ${e.unreadable} unreadable` : '')
-    + (e.in_batch ? ` · ${num(e.in_batch)} waiting in a batch` : '');
+  scanStats();
   updateStart();
 }
+function contentMode() { return S.state.settings.content_mode || 'funny'; }
+function current() {
+  // Scan numbers for the selected compilation type (switching type needs no rescan).
+  const e = S.scan; if (!e) return null;
+  const m = e.estimates?.[contentMode()];
+  return m ? { to_judge: m.clips, cached: m.ready, in_batch: m.in_batch, live: m.live, batch: m.batch, approx: m.approx }
+    : { to_judge: e.to_judge, cached: e.cached, in_batch: e.in_batch, live: e.estimate_usd, batch: e.estimate_batch_usd, approx: false };
+}
+function scanStats() {
+  const e = S.scan, c = current();
+  $('#pickRow').hidden = !e?.total;
+  if (e?.total) {
+    $('#pickRow').classList.toggle('picked', !!e.picked);
+    $('#pickInfo').textContent = e.picked ? `${num(e.clips)} of ${num(e.total)} clips chosen` : `All ${num(e.total)} clips in range`;
+    $('#pickClips').textContent = e.picked ? 'Change' : 'Choose clips';
+  }
+  if (!e || !e.total) return;
+  animateNumber($('#sClips'), e.clips); animateNumber($('#sCached'), c.cached); animateNumber($('#sTodo'), c.to_judge);
+  paintEstimate();
+  $('#scanRange').textContent = `${day(e.first)} to ${day(e.last)} · ${e.gb} GB` + (e.unreadable ? ` · ${e.unreadable} unreadable` : '')
+    + (c.in_batch ? ` · ${num(c.in_batch)} waiting in a batch` : '');
+}
 function batchMode() { return S.state.settings.judge_mode === 'batch'; }
-function estimate() { return S.scan ? (batchMode() ? S.scan.estimate_batch_usd : S.scan.estimate_usd) : 0; }
+function estimate() { const c = current(); return c ? (batchMode() ? c.batch : c.live) : 0; }
 function paintEstimate() {
   if (!S.scan) return;
   animateNumber($('#sCost'), estimate(), money);
-  $('#sCost').nextElementSibling.textContent = batchMode() ? 'estimated, batch price' : 'estimated';
+  $('#sCost').nextElementSibling.textContent = (current().approx ? 'approx.' : 'estimated') + (batchMode() ? ', batch price' : '');
 }
 function updateStart() {
-  const btn = $('#startBtn'), hint = $('#startHint'), s = S.state.settings, e = S.scan;
+  const btn = $('#startBtn'), hint = $('#startHint'), s = S.state.settings, e = S.scan ? { ...S.scan, ...current() } : null;
   hint.textContent = '';
-  if (!e || !e.clips) { btn.disabled = true; btn.textContent = 'Start'; return; }
+  if (!e || !e.clips) { btn.disabled = true; btn.textContent = 'Start'; if (e?.total) hint.textContent = 'Choose at least one clip.'; return; }
   btn.disabled = !s.output;
   if (!s.output) hint.textContent = 'Choose an output folder.';
   if (e.to_judge === 0) { btn.textContent = 'Build from saved judgments'; return; }
   const upTo = s.mode === 'reel' && !batchMode() ? 'up to ' : '';
   btn.textContent = `${batchMode() ? 'Submit' : 'Judge'} ${num(e.to_judge)} clips · ${upTo}~${money(estimate())}`;
-  const perClip = batchMode() ? e.batch_per_clip : e.batch_per_clip * 2;
+  const perClip = e.to_judge ? estimate() / e.to_judge : (batchMode() ? e.batch_per_clip : e.batch_per_clip * 2);
   if (!S.state.key.present) { btn.disabled = true; hint.textContent = 'Add your Gemini API key in Settings first.'; }
   else if (s.budget_usd && estimate() > s.budget_usd) {
     const fit = Math.floor(s.budget_usd / perClip);
@@ -300,10 +349,11 @@ function updateStart() {
       : `Your ${money(s.budget_usd)} cap stops judging after roughly ${num(fit)} clips.`;
     if (batchMode()) btn.textContent = `Submit ${num(Math.min(fit, e.to_judge))} clips · ~${money(Math.min(fit, e.to_judge) * perClip)}`;
   }
+  else if (batchMode() && contentMode() !== 'funny') hint.textContent = 'Skill runs as two batches: Google finds the plays, then the app uploads close-ups of them. Allow up to two days.';
   else if (s.mode === 'reel' && !batchMode()) hint.textContent = 'Judging stops once there is enough for the video, newest clips first.';
 }
 $('#startBtn').addEventListener('click', async () => {
-  const e = S.scan, s = S.state.settings;
+  const e = S.scan ? { ...S.scan, ...current() } : null, s = S.state.settings;
   const spend = Math.min(estimate(), s.budget_usd || Infinity);
   const what = batchMode() ? 'Submit this batch?' : 'Start judging?';
   if (spend >= 1 && !await confirmBox(what, `This can spend up to about ${money(spend)} on your Google account. Judged clips are saved, so they are never paid for twice.`, batchMode() ? 'Submit' : 'Start')) return;
@@ -312,20 +362,126 @@ $('#startBtn').addEventListener('click', async () => {
   if (mode) { setBusy('batch'); await refreshState(); go('batch'); } else go('judging');
 });
 
+// ---------- choose clips (local only: listing and ticking never calls Google) ----------
+const P = { clips: [], chosen: new Set(), original: null, filter: 'all', query: '' };
+$('#pickClips').addEventListener('click', openPicker);
+async function openPicker() {
+  if (S.busy) return toast('Wait for the current job to finish.');
+  const r = await call('scan_clips');
+  P.clips = r.clips; P.chosen = new Set(r.clips.filter((c) => c.chosen).map((c) => c.path));
+  P.original = S.scan?.picked ? [...P.chosen] : null; P.filter = 'all'; P.query = ''; $('#pickSearch').value = '';
+  go('pick'); seg($('#pickFilter'), 'all'); drawPicker(); paintPickSummary(S.scan);
+}
+function clipState(c) {
+  return c.unreadable ? ['bad', 'unreadable'] : c.ready ? ['ready', 'judged'] : c.pending ? ['pending', 'in a batch'] : ['', 'not judged'];
+}
+function drawPicker() {
+  const days = new Map();
+  P.clips.forEach((c, i) => { const k = day(c.when); if (!days.has(k)) days.set(k, []); days.get(k).push(i); });
+  const time = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const size = (mb) => mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.max(1, Math.round(mb))} MB`;
+  $('#pickList').innerHTML = [...days].map(([d, idx]) => `<section class="pick-day"><header><input type="checkbox" aria-label="Tick every clip on ${esc(d)}"><b>${esc(d)}</b><span></span></header>${
+    idx.map((i) => { const c = P.clips[i], [cls, label] = clipState(c);
+      return `<div class="pick-clip" data-i="${i}"><input type="checkbox" aria-label="${esc(c.name)}"><span class="name" title="${esc(c.name)}">${esc(c.name)}</span><span class="time">${time(c.when)}</span><span class="size">${size(c.mb)}</span><span class="state ${cls}">${label}</span><button class="play" title="Play in your video player"><svg class="ic"><use href="#i-play"/></svg></button></div>`; }).join('')
+  }</section>`).join('') || '<div class="empty">No clips in this scan.</div>';
+  applyPick();
+}
+function pickShown(c) {
+  return (P.filter === 'all' || (P.filter === 'ready') === c.ready) && (!P.query || c.name.toLowerCase().includes(P.query));
+}
+function applyPick() {
+  $$('#pickList .pick-day').forEach((dayEl) => {
+    let shown = 0, ticked = 0;
+    $$('.pick-clip', dayEl).forEach((row) => {
+      const c = P.clips[row.dataset.i], on = P.chosen.has(c.path), show = pickShown(c);
+      row.hidden = !show; $('input', row).checked = on; row.classList.toggle('off', !on);
+      if (show) { shown++; ticked += on; }
+    });
+    dayEl.hidden = !shown;
+    const box = $('header input', dayEl); box.checked = shown > 0 && ticked === shown; box.indeterminate = ticked > 0 && ticked < shown;
+    $('header span', dayEl).textContent = `${ticked} of ${shown} ticked`;
+  });
+  $('#pkCount').textContent = num(P.chosen.size); $('#pkTotal').textContent = num(P.clips.length);
+  $('#pickDone').disabled = !P.chosen.size;
+  syncPick();
+}
+const syncPick = debounce(async () => {
+  // The server works out counts and cost for the ticked clips; nothing is sent to Google.
+  const r = await S.api.select_clips([...P.chosen]);
+  if (!r.error) paintPickSummary(r);
+}, 150);
+function paintPickSummary(e) {
+  if (!e) return;
+  const m = e.estimates?.[contentMode()] || {};
+  $('#pkTodo').textContent = num(m.clips ?? e.to_judge);
+  $('#pkCost').textContent = money((batchMode() ? m.batch : m.live) ?? 0);
+  $('#pkCostLabel').textContent = (m.approx ? 'approx.' : 'estimated') + (batchMode() ? ', batch price' : '');
+}
+function tickShown(on, within = $('#pickList')) {
+  $$('.pick-clip', within).forEach((row) => { if (!row.hidden) { const c = P.clips[row.dataset.i]; on ? P.chosen.add(c.path) : P.chosen.delete(c.path); } });
+  applyPick();
+}
+$('#pickList').addEventListener('click', (ev) => {
+  const play = ev.target.closest('.play');
+  if (play) { ev.stopPropagation(); call('open_clip', P.clips[play.closest('.pick-clip').dataset.i].path); return; }
+  const row = ev.target.closest('.pick-clip');
+  if (row) { const c = P.clips[row.dataset.i]; P.chosen.has(c.path) ? P.chosen.delete(c.path) : P.chosen.add(c.path); applyPick(); return; }
+  const head = ev.target.closest('.pick-day > header');
+  if (head) { const dayEl = head.parentElement, rows = $$('.pick-clip', dayEl).filter((r) => !r.hidden);
+    tickShown(!rows.every((r) => P.chosen.has(P.clips[r.dataset.i].path)), dayEl); }
+});
+onSeg($('#pickFilter'), (v) => { P.filter = v; applyPick(); });
+$('#pickSearch').addEventListener('input', debounce((e) => { P.query = e.target.value.trim().toLowerCase(); applyPick(); }, 120));
+$('#pickAll').addEventListener('click', () => tickShown(true));
+$('#pickNone').addEventListener('click', () => tickShown(false));
+$('#pickCancel').addEventListener('click', async () => {
+  const r = await call('select_clips', P.original); S.scan = { ...S.scan, ...r }; go('home'); scanStats(); updateStart();
+});
+$('#pickDone').addEventListener('click', async () => {
+  const all = P.chosen.size === P.clips.length;
+  const r = await call('select_clips', all ? null : [...P.chosen]); S.scan = { ...S.scan, ...r };
+  go('home'); scanStats(); updateStart();
+});
+
+const RUN_LABEL = { batch_waiting: 'at Google', batch_uploading: 'uploading', judging: 'stopped' };
+function runRow(r, i) {
+  const what = r.status.startsWith('batch') || (r.judge_mode === 'batch' && !r.moments) ? `batch of ${r.batch?.clips ?? '?'} clips` : `${r.moments} moments`;
+  const kind = { skill: 'skill · ', both: 'funny + skill · ' }[r.content_mode] || '';
+  return `<div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${kind}${what} · ${r.mode === 'reel' ? 'one video' : 'parts'}</span></div><span class="pill ${r.status}">${RUN_LABEL[r.status] || r.status}</span>`;
+}
+async function openRun(folder) {
+  if (S.busy) return toast('Wait for the current job to finish.');
+  S.review = await call('open_run', folder); await refreshState();
+  go(isBatchRun(S.state.run) ? 'batch' : 'review');
+}
+
 function renderRecent() {
   const runs = S.state?.recent || [];
   $('#recentPanel').hidden = !runs.length;
-  const label = { batch_waiting: 'at Google', batch_uploading: 'uploading', judging: 'stopped' };
-  $('#recentList').innerHTML = runs.map((r, i) => {
-    const what = r.status.startsWith('batch') || (r.judge_mode === 'batch' && !r.moments) ? `batch of ${r.batch?.clips ?? '?'} clips` : `${r.moments} moments`;
-    return `<li data-i="${i}"><div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${what} · ${r.mode === 'reel' ? 'one video' : 'parts'}</span></div><span class="pill ${r.status}">${label[r.status] || r.status}</span></li>`;
-  }).join('');
-  $$('#recentList li').forEach((li) => li.addEventListener('click', async () => {
-    if (S.busy) return toast('Wait for the current job to finish.');
-    S.review = await call('open_run', runs[li.dataset.i].folder); await refreshState();
-    go(isBatchRun(S.state.run) ? 'batch' : 'review');
-  }));
+  $('#recentList').innerHTML = runs.map((r, i) => `<li data-i="${i}">${runRow(r)}</li>`).join('');
+  $$('#recentList li').forEach((li) => li.addEventListener('click', () => openRun(runs[li.dataset.i].folder)));
 }
+
+function renderDrafts() {
+  const runs = S.state?.drafts || [];
+  $('#draftEmpty').hidden = !!runs.length;
+  $('#draftList').innerHTML = runs.map((r, i) => `<li data-i="${i}">${runRow(r)}<button class="btn ghost sm discard" title="Discard draft"><svg class="ic"><use href="#i-trash"/></svg>Discard</button></li>`).join('');
+  $$('#draftList li').forEach((li) => {
+    const r = runs[li.dataset.i];
+    li.addEventListener('click', () => openRun(r.folder));
+    li.querySelector('.discard').addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (S.busy) return toast('Wait for the current job to finish.');
+      const atGoogle = r.status === 'batch_waiting';
+      const body = (atGoogle ? 'The batch is cancelled at Google first, so nothing unfinished is charged. ' : '')
+        + 'The folder goes to the Recycle Bin. Saved judgments are kept.';
+      if (!await confirmBox('Discard this draft?', body, 'Discard')) return;
+      await call('discard_run', r.folder); await refreshState(); toast('Draft discarded.');
+      if (!S.state.run && ['review', 'batch'].includes(S.screen)) go('drafts');
+    });
+  });
+}
+onEnter.drafts = () => refreshState();
 
 // ---------- judging ----------
 const RING = 326.7;
@@ -344,8 +500,9 @@ function judgeClip(e) {
   const j = S.judge; if (!j) return;
   j.done = e.done;
   if (e.status === 'judged') { j.fresh++; j.firstFresh ??= performance.now(); }
-  const min = S.state.settings.min_score;
-  j.moments += (e.scores || []).filter((s) => s >= min).length;
+  const min = S.state.settings.min_score, minSkill = S.state.settings.min_skill_score;
+  const lensOf = (k) => e.lenses?.[k] || 'funny', bar = (k) => lensOf(k) === 'skill' ? minSkill : min;
+  j.moments += (e.scores || []).filter((s, k) => s >= bar(k)).length;
   animateNumber($('#jDone'), e.done); animateNumber($('#jMoments'), j.moments);
   $('#jSpent').textContent = money(e.usd);
   $('#ringFill').style.strokeDashoffset = RING * (1 - e.done / Math.max(1, e.total));
@@ -359,7 +516,7 @@ function judgeClip(e) {
   const li = document.createElement('li');
   const chips = e.status === 'failed' ? '<span class="chip fail">failed</span>'
     : e.status === 'unjudged' ? '<span class="chip">not judged</span>'
-    : (e.scores?.length ? e.scores.map((s) => `<span class="chip ${s >= min ? 'hot' : ''}">${s}</span>`).join('') : '<span class="chip">none</span>');
+    : (e.scores?.length ? e.scores.map((s, k) => `<span class="chip ${lensOf(k)} ${s >= bar(k) ? 'hot' : ''}" title="${lensOf(k)}">${s}</span>`).join('') : '<span class="chip">none</span>');
   const why = e.status === 'failed' ? e.error : (e.reasons || [])[0];
   li.innerHTML = `<span class="name">${esc(e.name)}${e.status === 'cached' ? ' <span class="pill">saved</span>' : ''}</span><span class="chips">${chips}</span>${why ? `<span class="why">${esc(why)}</span>` : ''}`;
   $('#feed').prepend(li);
@@ -386,23 +543,31 @@ const video = $('#video');
 let thumbObserver;
 onEnter.review = async () => {
   if (!S.review) S.review = await call('get_review');
-  seg($('#filter'), S.filter); drawCards();
+  const mixed = (S.review.run.content_mode || 'funny') !== 'funny';
+  $('#lensFilter').hidden = !mixed; if (!mixed) S.lens = 'all';
+  seg($('#filter'), S.filter); seg($('#lensFilter'), S.lens); drawCards();
 };
 function drawCards() {
   const r = S.review, cards = $('#cards');
   const run = r.run;
-  $('#reviewSub').textContent = `${r.totals.total} moments scoring ${run.min_score}+ · ${run.mode === 'reel' ? `one video, target ${run.target_minutes} min` : `parts of ~${run.part_minutes} min`}`;
+  const kind = run.content_mode || 'funny';
+  const bar = kind === 'funny' ? `scoring ${run.min_score}+` : kind === 'skill' ? `with skill ${run.min_skill_score}+`
+    : `· funny ${run.min_score}+, skill ${run.min_skill_score}+`;
+  $('#reviewSub').textContent = `${r.totals.total} moments ${bar} · ${run.mode === 'reel' ? `one video, target ${run.target_minutes} min` : `parts of ~${run.part_minutes} min`}`;
   thumbObserver?.disconnect();
+  // Only cards that stay on screen briefly get a thumbnail, so a fast scroll doesn't queue hundreds of ffmpeg jobs.
   thumbObserver = new IntersectionObserver((entries) => entries.forEach((en) => {
+    clearTimeout(en.target.thumbWait);
     if (!en.isIntersecting) return;
-    thumbObserver.unobserve(en.target); loadThumb(en.target);
+    en.target.thumbWait = setTimeout(() => { thumbObserver.unobserve(en.target); loadThumb(en.target); }, 150);
   }), { root: cards, rootMargin: '200px' });
   cards.innerHTML = '';
   if (!r.moments.length) { cards.innerHTML = '<div class="empty">No moments reached the minimum score. Try a lower score or a wider date range.</div>'; }
   r.moments.forEach((m, i) => {
     const el = document.createElement('div');
     el.className = 'card'; el.dataset.i = i; el.style.animationDelay = Math.min(i, 24) * 18 + 'ms';
-    el.innerHTML = `<div class="thumb loading"><span class="score s${m.score}">${m.score}</span><span class="mark"><svg class="ic"><use href="#i-check"/></svg></span><span class="len"></span></div>
+    const badges = kind === 'funny' ? '' : `<span class="lenses">${lensBadges(m)}</span>`;
+    el.innerHTML = `<div class="thumb loading"><span class="score s${m.score} ${m.lens}">${m.score}</span>${badges}<span class="mark"><svg class="ic"><use href="#i-check"/></svg></span><span class="len"></span></div>
       <div class="meta"><span class="when">${esc(when(m.recorded_at))}</span><span class="why">${esc(m.reason)}</span></div>`;
     el.addEventListener('click', () => select(i));
     $('.mark', el).addEventListener('click', (ev) => { ev.stopPropagation(); decide(i, !S.review.moments[i].keep, false); });
@@ -425,14 +590,18 @@ function paintCard(i) {
   $('.mark use', el).setAttribute('href', m.keep ? '#i-check' : '#i-x');
   $('.len', el).textContent = clock(m.end - m.start).replace(/\.\d$/, '');
 }
+function lensBadges(m) {
+  return (m.lenses || ['funny']).map((l) => `<span class="badge ${l}">${l === 'skill' ? 'Skill' : 'Funny'}</span>`).join('');
+}
 function applyFilter() {
   S.visible = [];
   S.review.moments.forEach((m, i) => {
-    const show = S.filter === 'all' || (S.filter === 'kept') === m.keep;
+    const show = (S.filter === 'all' || (S.filter === 'kept') === m.keep) && (S.lens === 'all' || (m.lenses || ['funny']).includes(S.lens));
     $(`.card[data-i="${i}"]`).hidden = !show; if (show) S.visible.push(i);
   });
 }
 onSeg($('#filter'), (v) => { S.filter = v; applyFilter(); });
+onSeg($('#lensFilter'), (v) => { S.lens = v; applyFilter(); });
 function totals(t) {
   animateNumber($('#dKept'), t.kept); animateNumber($('#dMin'), t.minutes, (v) => v.toFixed(1));
   $('#dParts').textContent = S.review.run.mode === 'parts' && t.parts ? ` · ${t.parts} part${t.parts > 1 ? 's' : ''}` : '';
@@ -447,8 +616,18 @@ async function select(i, play = true) {
   const card = $(`.card[data-i="${i}"]`); card?.classList.add('sel');
   card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   const m = S.review.moments[i];
-  $('#pScore').className = `score s${m.score}`; $('#pScore').textContent = m.score;
-  $('#pWhen').textContent = `${when(m.recorded_at)} · ${m.clip}`; $('#pReason').textContent = m.reason;
+  $('#pScore').className = `score s${m.score} ${m.lens}`; $('#pScore').textContent = m.score;
+  $('#pScore').title = m.lens === 'skill' ? 'Skill score' : 'Funny score';
+  const mixed = (S.review.run.content_mode || 'funny') !== 'funny';
+  $('#pLenses').innerHTML = mixed ? lensBadges(m) : '';
+  $('#pWhen').textContent = `${when(m.recorded_at)} · ${m.clip}${m.game && m.game !== 'other' ? ' · ' + m.game.toUpperCase() : ''}`;
+  $('#pReason').textContent = m.reason;
+  const both = (m.lenses || []).length > 1 && m.skill_reason;
+  $('#pSkillReason').hidden = !both;
+  if (both) $('#pSkillReason').textContent = m.lens === 'skill' ? `Also funny (${m.funny_score})` : `Skill ${m.skill_score}: ${m.skill_reason}`;
+  const tags = (m.skill_tags || []).map((t) => `<span class="tag">${esc(t)}</span>`)
+    .concat((m.skill_drawbacks || []).map((t) => `<span class="tag minus">${esc(t)}</span>`));
+  $('#pTags').hidden = !tags.length; $('#pTags').innerHTML = tags.join('');
   paintTrim(m); playerButtons(m);
   if (!play) return;
   $('#videoLoad').classList.add('on'); video.pause();
@@ -465,6 +644,8 @@ function playerButtons(m) {
 }
 function paintTrim(m) {
   const span = m.window_end - m.window_start;
+  $('#trimKills').innerHTML = (m.kills || []).filter((t) => t >= m.window_start && t <= m.window_end)
+    .map((t) => `<i style="left:${(t - m.window_start) / span * 100}%" title="Kill at ${clock(t)}"></i>`).join('');
   $('#trimSel').style.left = (m.start - m.window_start) / span * 100 + '%';
   $('#trimSel').style.width = (m.end - m.start) / span * 100 + '%';
   $('#tStart').textContent = clock(m.start); $('#tEnd').textContent = clock(m.end); $('#tLen').textContent = clock(m.end - m.start);
@@ -590,9 +771,10 @@ onEnter.settings = async () => {
   $('#loudnorm').checked = s.loudnorm; $('#timestamp').checked = s.timestamp_overlay;
   $('#workers').value = s.workers; $('#workersOut').textContent = s.workers; fillRange($('#workers'));
   setFolder($('#cachePick'), S.state.cache.folder);
+  seg($('#gameOverride'), s.game_override);
   $('#about').textContent = `${S.state.app} ${S.state.version}`;
   const st = await S.api.storage();
-  if (!st.error) $('#storageInfo').textContent = `${num(st.cache_files)} clips judged and saved · previews use ${st.previews_mb} MB`;
+  if (!st.error) $('#storageInfo').textContent = `${num(st.cache_files)} clips judged for humor${st.skill_files ? `, ${num(st.skill_files)} for skill` : ''} · previews use ${st.previews_mb} MB`;
 };
 $('#keySave').addEventListener('click', () => saveKey($('#keyInput'), $('#keyState'), () => setTimeout(onEnter.settings, 50)));
 $('#keyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#keySave').click(); });
@@ -605,6 +787,8 @@ $('#keyRemove').addEventListener('click', async () => {
   await call('clear_key'); await refreshState(); keyState($('#keyState'), '', ''); onEnter.settings();
 });
 onSeg($('#height'), (v) => saveSettings({ height: Number(v) }));
+onSeg($('#gameOverride'), (v) => { saveSettings({ game_override: v }); S.scan = null; });
+$('#editProfiles').addEventListener('click', () => call('edit_profiles'));
 onSeg($('#fps'), (v) => saveSettings({ fps: Number(v) }));
 $('#loudnorm').addEventListener('change', (e) => saveSettings({ loudnorm: e.target.checked }));
 $('#timestamp').addEventListener('change', (e) => saveSettings({ timestamp_overlay: e.target.checked }));
@@ -653,6 +837,9 @@ function paintBatch() {
   $('#bCost').nextElementSibling.textContent = b.usd != null ? 'charged' : 'estimated';
   $('#bSubmitted').textContent = shortTime(b.submitted); $('#bExpires').textContent = shortTime(b.expires);
   const uploading = run.status === 'batch_uploading', waiting = run.status === 'batch_waiting', cancelled = run.status === 'cancelled';
+  const skillRun = (run.content_mode || 'funny') !== 'funny', stage2 = run.stage === 2;
+  $('#bStage').hidden = !skillRun;
+  $('#bStage').textContent = stage2 ? 'Stage 2 of 2: close-ups of the plays Google found' : 'Stage 1 of 2: finding the plays';
   $('#bBar').hidden = !uploading;
   $('#bCheck').hidden = !waiting; $('#bCancel').hidden = !(waiting || (uploading && S.busy === 'batch'));
   $('#bResume').hidden = !((uploading && S.busy !== 'batch') || (cancelled && !b.job));
@@ -671,7 +858,7 @@ function batchUpload(e) {
   if (S.screen !== 'batch') { if (S.state.run) S.state.run.status = 'batch_uploading'; go('batch'); }
   $('#bResume').hidden = true; $('#bCancel').hidden = false; $('#bCheck').hidden = true; steps(0);
   $('#bBar').hidden = false; $('#bBar i').style.width = (e.total ? e.done / e.total * 100 : 0) + '%';
-  batchState(`Uploading clips · ${num(e.done)} of ${num(e.total)}`);
+  batchState(`${e.stage === 2 ? 'Uploading close-ups' : 'Uploading clips'} · ${num(e.done)} of ${num(e.total)}`);
   $('#bClips').textContent = num(e.total);
   $('#bHint').textContent = e.capped ? `${num(e.capped)} older clips are left out to stay within your budget cap.` : 'Keep the PC on until the upload finishes.';
 }

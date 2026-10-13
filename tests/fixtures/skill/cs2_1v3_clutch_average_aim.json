@@ -1,0 +1,51 @@
+{
+ "game": "cs2",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 1,
+    "headshot": "yes",
+    "flick": "small",
+    "reaction": "normal",
+    "range": "mid",
+    "target_moving": false,
+    "shots": "spray",
+    "special": []
+   },
+   {
+    "t": 3,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "mid",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 5,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 0,
+   "enemies_alive": 3,
+   "low_hp": false,
+   "round_decisive": true,
+   "outnumbered": false,
+   "enemies_aware": true
+  },
+  "penalty_flags": [],
+  "evidence": "fixture",
+  "holistic_difficulty": 8,
+  "one_liner": "Wins a 1v3"
+ }
+}

@@ -18,7 +18,10 @@
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></symbol>
   <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/></symbol>
   <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></symbol>
   <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></symbol>
+  <symbol id="i-draft" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
 </svg>
 
 <div class="app" id="app">
@@ -27,6 +30,7 @@
     <nav>
       <button class="nav" data-go="home" title="New compilation"><svg class="ic"><use href="#i-plus"/></svg><span>New</span></button>
       <button class="nav" data-go="review" title="Review moments" disabled><svg class="ic"><use href="#i-grid"/></svg><span>Review</span></button>
+      <button class="nav" data-go="drafts" title="Unfinished compilations"><svg class="ic"><use href="#i-draft"/></svg><span>Drafts</span></button>
       <button class="nav" data-go="settings" title="Settings"><svg class="ic"><use href="#i-gear"/></svg><span>Settings</span></button>
     </nav>
     <div class="busy-dot" id="busyDot" title=""></div>
@@ -40,7 +44,7 @@
         <div class="ob-step" data-step="0">
           <div class="hero-mark"><svg class="ic"><use href="#i-film"/></svg></div>
           <h1>Auto Clip Compiler</h1>
-          <p class="lede">Turns a folder of game clips into compilations of the funny moments. Google's Gemini watches and listens to each clip and scores what happens.</p>
+          <p class="lede">Turns a folder of game clips into compilations of your funniest moments, your best plays, or both. Google's Gemini watches and listens to each clip and scores what happens.</p>
           <ul class="facts">
             <li><b>~$0.0045</b><span>per 30-second clip judged</span></li>
             <li><b>Once</b><span>per clip: judgments are saved</span></li>
@@ -93,6 +97,25 @@
             <div><label for="until">To</label><input type="date" id="until"></div>
           </div>
           <div class="field">
+            <label>Compilation</label>
+            <div class="seg" id="contentMode">
+              <button data-v="funny">Funny</button><button data-v="skill">Skill</button><button data-v="both">Both</button><i class="seg-glider"></i>
+            </div>
+            <p class="hint" id="contentHint"></p>
+          </div>
+          <div class="field skill-only" id="skillPresetField">
+            <label>What counts as skill</label>
+            <div class="seg" id="skillPreset">
+              <button data-v="balanced">Balanced</button><button data-v="aim">Aim</button><button data-v="clutch">Clutch</button><i class="seg-glider"></i>
+            </div>
+            <p class="hint" id="presetHint"></p>
+          </div>
+          <div class="field both-only" id="skillShareField">
+            <label for="skillShare">Mix <output id="skillShareOut"></output></label>
+            <input type="range" id="skillShare" min="10" max="90" step="10">
+            <div class="scale"><span>mostly funny</span><span>mostly skill</span></div>
+          </div>
+          <div class="field">
             <label>Output</label>
             <div class="seg" id="mode">
               <button data-v="reel">One video</button><button data-v="parts">Split into parts</button><i class="seg-glider"></i>
@@ -109,10 +132,15 @@
             <div><label for="length" id="lengthLabel">Length (min)</label><input type="number" id="length" min="1" max="600" step="1"></div>
             <div><label for="budget">Budget cap ($)</label><input type="number" id="budget" min="0" step="0.5"></div>
           </div>
-          <div class="field">
-            <label for="minScore">Minimum score <output id="minScoreOut"></output></label>
+          <div class="field funny-only" id="minScoreField">
+            <label for="minScore"><span id="minScoreLabel">Minimum score</span> <output id="minScoreOut"></output></label>
             <input type="range" id="minScore" min="1" max="10" step="1">
             <div class="scale"><span>keep more</span><span>funniest only</span></div>
+          </div>
+          <div class="field skill-only" id="minSkillField">
+            <label for="minSkillScore"><span id="minSkillLabel">Minimum skill score</span> <output id="minSkillScoreOut"></output></label>
+            <input type="range" id="minSkillScore" min="1" max="10" step="1">
+            <div class="scale"><span>keep more</span><span>best plays only</span></div>
           </div>
         </div>
 
@@ -126,6 +154,7 @@
               <div><b id="sCost">$0</b><span>estimated</span></div>
             </div>
             <div class="scan-range" id="scanRange"></div>
+            <div class="pick-row" id="pickRow" hidden><span id="pickInfo"></span><button class="link" id="pickClips">Choose clips</button></div>
             <div class="bar thin" id="scanBar" hidden><i></i></div>
             <button class="btn primary lg block" id="startBtn" disabled>Start</button>
             <div class="hint" id="startHint"></div>
@@ -136,6 +165,24 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Choose clips -->
+    <section class="screen" data-screen="pick">
+      <header class="head row">
+        <div><h1>Choose clips</h1><p class="sub" id="pickSub">Tick the clips to use. Only ticked clips are judged or rendered.</p></div>
+        <div class="tools">
+          <input type="text" id="pickSearch" placeholder="Filter by name" autocomplete="off" spellcheck="false">
+          <div class="seg small" id="pickFilter"><button data-v="all">All</button><button data-v="new">Not judged</button><button data-v="ready">Judged</button><i class="seg-glider"></i></div>
+          <button class="btn ghost sm" id="pickAll">Tick shown</button>
+          <button class="btn ghost sm" id="pickNone">Untick shown</button>
+        </div>
+      </header>
+      <div class="pick-list" id="pickList"></div>
+      <footer class="dock">
+        <div class="dock-stats"><b id="pkCount">0</b> of <span id="pkTotal">0</span> clips · <b id="pkTodo">0</b> to judge · <b id="pkCost">$0</b> <span id="pkCostLabel">estimated</span></div>
+        <div class="tools"><button class="btn ghost" id="pickCancel">Cancel</button><button class="btn primary lg" id="pickDone">Use these clips</button></div>
+      </footer>
     </section>
 
     <!-- Judging -->
@@ -170,6 +217,7 @@
           <li><i></i><b>Google judges</b><span>PC can be off</span></li>
           <li><i></i><b>Review</b><span>results collected</span></li>
         </ol>
+        <p class="bstage" id="bStage" hidden></p>
         <div class="bstate"><span class="pulse" id="bPulse"></span><b id="bState">Uploading clips</b></div>
         <div class="bar" id="bBar"><i></i></div>
         <div class="bstats">
@@ -192,6 +240,7 @@
       <header class="head row">
         <div><h1>Review</h1><p class="sub" id="reviewSub"></p></div>
         <div class="tools">
+          <div class="seg small" id="lensFilter" hidden><button data-v="all">Any</button><button data-v="funny">Funny</button><button data-v="skill">Skill</button><i class="seg-glider"></i></div>
           <div class="seg small" id="filter"><button data-v="all">All</button><button data-v="kept">Kept</button><button data-v="cut">Cut</button><i class="seg-glider"></i></div>
           <button class="btn ghost sm" id="keepAll">Keep all</button>
           <button class="btn ghost sm" id="cutAll">Cut all</button>
@@ -202,11 +251,13 @@
         <aside class="player panel" id="player">
           <div class="video-wrap"><video id="video" preload="auto" playsinline></video><div class="video-load" id="videoLoad"></div></div>
           <div class="trim" id="trim">
-            <div class="trim-track"><div class="trim-sel" id="trimSel"><i class="h l" data-h="start"></i><i class="h r" data-h="end"></i></div><div class="playhead" id="playhead"></div></div>
+            <div class="trim-track"><div class="kills" id="trimKills"></div><div class="trim-sel" id="trimSel"><i class="h l" data-h="start"></i><i class="h r" data-h="end"></i></div><div class="playhead" id="playhead"></div></div>
             <div class="trim-times"><span id="tStart"></span><span id="tLen"></span><span id="tEnd"></span></div>
           </div>
-          <div class="pmeta"><span class="score" id="pScore"></span><span id="pWhen"></span></div>
+          <div class="pmeta"><span class="score" id="pScore"></span><span class="lenses" id="pLenses"></span><span id="pWhen"></span></div>
           <p class="reason" id="pReason"></p>
+          <p class="reason second" id="pSkillReason" hidden></p>
+          <div class="tags" id="pTags" hidden></div>
           <div class="pbtns">
             <button class="btn keep" id="pKeep"><svg class="ic"><use href="#i-check"/></svg>Keep <kbd>K</kbd></button>
             <button class="btn cut" id="pCut"><svg class="ic"><use href="#i-x"/></svg>Cut <kbd>X</kbd></button>
@@ -234,6 +285,15 @@
       </div>
     </section>
 
+    <!-- Drafts -->
+    <section class="screen" data-screen="drafts">
+      <header class="head"><h1>Drafts</h1><p class="sub">Compilations you haven't rendered yet. Discarding one moves its folder to the Recycle Bin; saved judgments are kept, so judging those clips again is free.</p></header>
+      <div class="panel drafts">
+        <ul id="draftList"></ul>
+        <p class="hint" id="draftEmpty" hidden>No drafts. Stopped, cancelled and unrendered compilations show up here.</p>
+      </div>
+    </section>
+
     <!-- Settings -->
     <section class="screen" data-screen="settings">
       <header class="head"><h1>Settings</h1><p class="sub">Saved automatically.</p></header>
@@ -251,6 +311,12 @@
           <div class="field"><label>Frame rate</label><div class="seg" id="fps"><button data-v="30">30</button><button data-v="60">60</button><i class="seg-glider"></i></div></div>
           <label class="toggle"><input type="checkbox" id="loudnorm"><i></i><span>Even out volume between clips</span></label>
           <label class="toggle"><input type="checkbox" id="timestamp"><i></i><span>Show recording date on each moment</span></label>
+        </div>
+        <div class="panel">
+          <h3><svg class="ic"><use href="#i-target"/></svg>Skill judging</h3>
+          <div class="field"><label>Game</label><div class="seg" id="gameOverride"><button data-v="auto">Detect</button><button data-v="cs2">CS2</button><button data-v="rust">Rust</button><button data-v="generic">Other</button><i class="seg-glider"></i></div></div>
+          <p class="hint">Detect picks the rules per clip: tuned for Counter-Strike 2 and Rust, general shooter rules for anything else. Skill is scored on difficulty and situation, not kill count.</p>
+          <div class="row-btns"><button class="btn ghost sm" id="editProfiles">Fine-tune scoring</button></div>
         </div>
         <div class="panel">
           <h3>Performance</h3>

@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
 import unittest
@@ -93,6 +94,35 @@ class ApiFlowTests(unittest.TestCase):
         run = json.loads((Path(self.api.get_state()['run']['folder'])/'run.json').read_text(encoding='utf-8'))
         self.assertEqual(run['status'], 'rendered')
         self.assertFalse(run['decisions'][first['id']]['keep'])
+
+    def test_discarding_a_draft_recycles_its_folder_and_keeps_judgments(self):
+        self.judge()
+        drafts = self.api.get_state()['drafts']
+        self.assertEqual([d['status'] for d in drafts], ['review'])
+        folder = Path(drafts[0]['folder'])
+        with patch('clipcompiler.ui.api.recycle', side_effect=shutil.rmtree) as recycled:
+            self.assertTrue(self.api.discard_run(str(folder))['ok'])
+        recycled.assert_called_once_with(folder)
+        state = self.api.get_state()
+        self.assertFalse(folder.exists()); self.assertIsNone(state['run']); self.assertEqual(state['drafts'], [])
+        fresh = Api(judge_fn=lambda p, s: self.fail('re-judged'))
+        fresh.scan(); e = None
+        deadline = time.monotonic()+30
+        while not e and time.monotonic() < deadline:
+            e = next((x for x in fresh.events(0)['events'] if x['type'] == 'scan_done'), None); time.sleep(.05)
+        self.assertEqual((e['cached'], e['to_judge']), (3, 0))  # Judgments live in the cache, not the draft.
+
+    def test_discard_refuses_rendered_runs_and_folders_outside_the_output(self):
+        self.judge()
+        self.api.start_render(); self.wait('render_done'); self.wait_idle()
+        folder = self.api.get_state()['run']['folder']
+        self.assertEqual(self.api.get_state()['drafts'], [])
+        with patch('clipcompiler.ui.api.recycle') as recycled:
+            self.assertIn('error', self.api.discard_run(folder))
+            stray = Path(self.home.name)/'Compilation elsewhere'; stray.mkdir(); (stray/'run.json').write_text('{}')
+            self.assertIn('error', self.api.discard_run(str(stray)))
+            self.assertIn('error', self.api.discard_run(str(self.out)))
+        recycled.assert_not_called()
 
     def test_rescan_after_judging_costs_nothing_and_reopening_keeps_decisions(self):
         self.judge()

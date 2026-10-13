@@ -110,6 +110,16 @@ class ApiBatchTests(unittest.TestCase):
         self.assertEqual(self.api.get_state()['run']['status'], 'cancelled')
         self.assertEqual(self.api.check_batch()['done'], False)
 
+    def test_discarding_a_waiting_batch_cancels_it_at_google_first(self):
+        waiting = self.submit()
+        folder = self.api.get_state()['drafts'][0]['folder']
+        with patch('clipcompiler.ui.api.recycle') as recycled:
+            self.assertTrue(self.api.discard_run(folder)['ok'])
+        self.assertEqual(self.google.batches.cancelled, [waiting['batch']['job']])
+        self.assertEqual(self.google.files.store, {})
+        recycled.assert_called_once_with(Path(folder))
+        self.assertIsNone(self.api.get_state()['run'])
+
     def test_failed_batch_still_opens_review_and_says_why(self):
         waiting = self.submit()
         self.google.batches.finish(waiting['batch']['job'], 'JOB_STATE_EXPIRED')

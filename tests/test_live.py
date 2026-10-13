@@ -28,7 +28,8 @@ class LiveGeminiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root); source = root/'clips'; source.mkdir()
             for i in range(2): clip(source/f'2026-10-0{i+1} 20-00-10.mp4', seconds=6, frequency=300+200*i)
-            before = {f.name for f in gemini.client(api_key).files.list()}
+            gc = gemini.client(api_key)
+            before = {f.name for f in gc.files.list()}
             events = []
             result = job.JudgeJob(discover(source), root/'cache', root/'scratch', api_key=api_key, workers=2,
                                   emit=events.append).run()
@@ -36,9 +37,34 @@ class LiveGeminiTests(unittest.TestCase):
             self.assertEqual(len(list((root/'cache').glob('*.json'))), 2)
             self.assertGreater(result['usage']['input_tokens'], 0)
             self.assertLess(result['usage']['usd'], .05)
-            after = {f.name for f in gemini.client(api_key).files.list()}
+            after = {f.name for f in gc.files.list()}
             self.assertFalse(after - before, 'uploads were left on Google')
 
+
+    def test_skill_triage_and_a_close_up_return_valid_facts(self):
+        """Stage A on a synthetic clip, then stage B forced on one window (test patterns have no real plays)."""
+        import json
+        from clipcompiler import skill
+        api_key = key(); self.assertTrue(api_key, 'no API key')
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root); source = root/'clips'; source.mkdir()
+            path = clip(source/'2026-10-01 20-00-10.mp4', seconds=6)
+            gc = gemini.client(api_key)
+            before = {f.name for f in gc.files.list()}
+            judge = job.JudgeJob(discover(source), root/'cache', root, api_key=api_key, workers=1, content_mode='skill')
+            result = judge.run()
+            self.assertEqual((result['usage']['clips'], result['usage']['failed']), (1, 0))
+            record = json.loads(next((root/'cache'/'skill').glob('*.json')).read_text(encoding='utf-8'))
+            self.assertIn(record['triage']['game'], skill.GAMES)
+            play = {'start': 1., 'end': 4., 'kills': 1, 'preliminary': 5, 'what': 'forced'}
+            detail = judge.detail(path, skill.load_profile('cs2'), play, skill.window_bounds(play, 6.))
+            for field in ('kills', 'situation', 'penalty_flags', 'holistic_difficulty', 'one_liner'): self.assertIn(field, detail)
+            self.assertIn(skill.score(detail, skill.load_profile('cs2')), range(1, 11))
+            print(f"  tokens: triage {result['usage']['input_tokens']} in; close-up {detail['_meta']['input_tokens']} in, "
+                  f"${gemini.cost(detail['_meta']):.4f}", flush=True)
+            self.assertLess(result['usage']['usd'] + gemini.cost(detail['_meta']), .05)
+            after = {f.name for f in gc.files.list()}
+            self.assertFalse(after - before, 'uploads were left on Google')
 
     def test_batch_submit_wait_collect_end_to_end(self):
         """Real Batch API round trip on 2 tiny clips. Google usually finishes in ~10 min; gives up after 45."""

@@ -26,7 +26,8 @@ def moments_for(path, when, hint, result, meta, digest):
         yield dict(id=identity([digest, start, end]), source=digest, source_hash=digest, source_path=str(path),
                    start=start, end=end, duration=meta['duration'], audio_stream=meta['audio_stream'],
                    recorded_at=when, score=int(m['score']), reason=m['why_funny'], transcript='',
-                   recommendation='keep', clip_wall=clip_start, clip_name=path.name)
+                   recommendation='keep', clip_wall=clip_start, clip_name=path.name, lenses=['funny'],
+                   funny_score=int(m['score']))
 
 
 def wall(m):
@@ -63,9 +64,67 @@ def dedupe(moments):
     return accepted
 
 
-def pick(moments, target):
-    chosen, total = [], 0.
-    for m in sorted(moments, key=lambda m: (-m['score'], m['recorded_at'])):
+def overlap(a, b):
+    """Seconds two moments share: in the same recording, else in wall time; <= 0 when unrelated."""
+    if a.get('source') and a.get('source') == b.get('source'):
+        return min(a['end'], b['end']) - max(a['start'], b['start'])
+    wa, wb = wall(a), wall(b)
+    if wa is None or wb is None: return 0.
+    return min(wa[1], wb[1]) - max(wa[0], wb[0])
+
+
+def absorb(f, s):
+    """Fold skill moment s into funny moment f: one moment, both tags, both scores."""
+    if f.get('source') and f.get('source') == s.get('source'):
+        f['start'], f['end'] = min(f['start'], s['start']), max(f['end'], s['end'])
+    elif wall(f) and wall(s):
+        union = (min(wall(f)[0], wall(s)[0]), max(wall(f)[1], wall(s)[1]))
+        if f['clip_wall'] <= union[0] and union[1] <= f['clip_wall']+f['duration']:
+            f['start'], f['end'] = union[0]-f['clip_wall'], union[1]-f['clip_wall']
+    f['lenses'] = sorted(set(f.get('lenses', ['funny'])) | {'skill'})
+    for key in ('skill_score', 'skill_tags', 'skill_drawbacks', 'game', 'kills'):
+        if key in s: f[key] = s[key]
+    f['skill_reason'] = s['reason']
+
+
+def merge_lenses(funny, skilled):
+    """A play that is both funny and skillful is shown once with both tags. A skill moment that only
+    partly repeats a funny one keeps just its new footage, like replay dedupe."""
+    out = [dict(m) for m in funny]
+    for s in sorted(skilled, key=lambda m: (-m['score'], m['id'])):
+        s = dict(s); keep = True
+        for f in out:
+            if 'funny' not in f.get('lenses', ['funny']): continue
+            shared = overlap(s, f)
+            if shared <= .5: continue
+            if shared >= .5*min(s['end']-s['start'], f['end']-f['start']):
+                absorb(f, s); keep = False; break
+            same = f.get('source') and f.get('source') == s.get('source')
+            fs, fe = (f['start'], f['end']) if same else (wall(f)[0]-s['clip_wall'], wall(f)[1]-s['clip_wall'])
+            if s['start'] < fs: s['end'] = fs
+            else: s['start'] = fe
+        if keep and s['end']-s['start'] >= 2: out.append(s)
+    return out
+
+
+def pick(moments, target, skill_share=None):
+    """Best first until target seconds, then chronological. With skill_share (Both mode), skill and funny
+    moments each fill their own share by their own score; leftover time goes to whatever clears its
+    threshold by the most."""
+    if skill_share is None:
+        chosen, total = [], 0.
+        for m in sorted(moments, key=lambda m: (-m['score'], m['recorded_at'])):
+            if total >= target: break
+            chosen.append(m); total += m['end']-m['start']
+        return sorted(chosen, key=lambda m: (m['recorded_at'], m['start'])), total
+    quota = {'skill': target*skill_share, 'funny': target*(1-skill_share)}
+    chosen, used = [], {'skill': 0., 'funny': 0.}
+    for lens in ('skill', 'funny'):
+        for m in sorted((m for m in moments if m.get('lens', 'funny') == lens), key=lambda m: (-m['score'], m['recorded_at'])):
+            if used[lens] >= quota[lens]: break
+            chosen.append(m); used[lens] += m['end']-m['start']
+    total = sum(used.values()); taken = {m['id'] for m in chosen}
+    for m in sorted((m for m in moments if m['id'] not in taken), key=lambda m: (-m.get('margin', 0), m['recorded_at'])):
         if total >= target: break
         chosen.append(m); total += m['end']-m['start']
     return sorted(chosen, key=lambda m: (m['recorded_at'], m['start'])), total

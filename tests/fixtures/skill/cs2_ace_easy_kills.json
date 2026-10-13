@@ -1,0 +1,71 @@
+{
+ "game": "cs2",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 1,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 2,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 3,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 4,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 5,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 3,
+   "enemies_alive": 5,
+   "low_hp": false,
+   "round_decisive": true,
+   "outnumbered": false,
+   "enemies_aware": true
+  },
+  "penalty_flags": [],
+  "evidence": "fixture",
+  "holistic_difficulty": 7,
+  "one_liner": "Ace"
+ }
+}

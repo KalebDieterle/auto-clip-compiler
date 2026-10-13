@@ -1,0 +1,43 @@
+{
+ "game": "cs2",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 2,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "spray",
+    "special": []
+   },
+   {
+    "t": 4,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "close",
+    "target_moving": false,
+    "shots": "spray",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 2,
+   "enemies_alive": 2,
+   "low_hp": false,
+   "round_decisive": false,
+   "outnumbered": false,
+   "enemies_aware": true
+  },
+  "penalty_flags": [
+   "long_spray_many_misses"
+  ],
+  "evidence": "fixture",
+  "holistic_difficulty": 4,
+  "one_liner": "Sprays down two players"
+ }
+}

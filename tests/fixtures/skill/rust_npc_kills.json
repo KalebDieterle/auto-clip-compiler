@@ -1,0 +1,43 @@
+{
+ "game": "rust",
+ "features": {
+  "start": 0.5,
+  "end": 6,
+  "kills": [
+   {
+    "t": 2,
+    "headshot": "yes",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "mid",
+    "target_moving": false,
+    "shots": "burst",
+    "special": []
+   },
+   {
+    "t": 5,
+    "headshot": "no",
+    "flick": "none",
+    "reaction": "normal",
+    "range": "mid",
+    "target_moving": false,
+    "shots": "spray",
+    "special": []
+   }
+  ],
+  "situation": {
+   "teammates_alive": 1,
+   "enemies_alive": 2,
+   "low_hp": false,
+   "round_decisive": false,
+   "outnumbered": false,
+   "enemies_aware": true
+  },
+  "penalty_flags": [
+   "npc_or_bot"
+  ],
+  "evidence": "fixture",
+  "holistic_difficulty": 3,
+  "one_liner": "Clears scientists"
+ }
+}

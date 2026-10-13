@@ -10,7 +10,7 @@ from unittest.mock import patch
 import keyring
 from keyring.backend import KeyringBackend
 
-from clipcompiler import settings
+from clipcompiler import settings, skill
 
 FAKE_KEY = 'AIzaSyD' + 'x'*32
 
@@ -55,6 +55,29 @@ class SettingsTests(unittest.TestCase):
         loaded = settings.load()
         self.assertEqual((loaded.min_score, loaded.source, loaded.onboarded), (7, 'D:/Clips', True))
 
+    def test_a_v1_file_loads_with_the_new_defaults_and_keeps_its_values(self):
+        v1 = {'version': 1, 'onboarded': True, 'source': 'D:/Clips', 'output': 'D:/Out', 'mode': 'parts',
+              'judge_mode': 'batch', 'min_score': 6, 'budget_usd': 3.0, 'model': 'gemini-flash-latest'}
+        (Path(self.temp.name)/'settings.json').write_text(json.dumps(v1), encoding='utf-8')
+        loaded = settings.load()
+        self.assertEqual((loaded.mode, loaded.judge_mode, loaded.min_score, loaded.budget_usd), ('parts', 'batch', 6, 3.))
+        self.assertEqual((loaded.content_mode, loaded.min_skill_score, loaded.skill_preset, loaded.skill_share,
+                          loaded.game_override), ('funny', 7, 'balanced', .4, 'auto'))   # Existing users: nothing changes.
+        settings.save(loaded)
+        self.assertEqual(json.loads((Path(self.temp.name)/'settings.json').read_text(encoding='utf-8'))['version'], 2)
+
+    def test_skill_options_are_validated(self):
+        for bad in ({'content_mode': 'serious'}, {'min_skill_score': 0}, {'skill_preset': 'spray'},
+                    {'skill_share': .95}, {'game_override': 'valorant'}):
+            with self.assertRaises(ValueError, msg=bad): settings.save(settings.Settings(**bad))
+        good = settings.Settings(content_mode='both', min_skill_score=8, skill_preset='clutch', skill_share=.5, game_override='cs2')
+        settings.save(good); self.assertEqual(settings.load(), good)
+
+    def test_profiles_follow_the_skill_settings(self):
+        p = settings.profiles(settings.Settings(skill_preset='aim', game_override='rust'))
+        self.assertEqual((p.for_game('cs2')['name'], p.for_game('cs2')['weights']), ('rust', skill.PRESET_WEIGHTS['aim']))
+        self.assertEqual(p.user_dir, Path(self.temp.name)/'skill_profiles')
+
     def test_key_lives_in_keyring_never_in_settings(self):
         settings.set_key(f'  {FAKE_KEY}\n'); settings.save(settings.Settings(onboarded=True))
         self.assertEqual(settings.get_key(), FAKE_KEY)
@@ -93,6 +116,23 @@ class SettingsTests(unittest.TestCase):
         for error, state in cases:
             with patch('clipcompiler.gemini.client', return_value=Client(error)):
                 self.assertEqual(settings.validate_key(FAKE_KEY)['state'], state)
+        # A local bug is not "check your internet": it says what went wrong.
+        with patch('clipcompiler.gemini.client', return_value=Client(RuntimeError('something broke'))):
+            result = settings.validate_key(FAKE_KEY)
+        self.assertEqual((result['state'], result['message']), ('error', 'something broke'))
+
+    def test_validate_key_keeps_the_client_alive_for_the_call(self):
+        class ClosingClient:
+            """Like google-genai: a Client that is garbage-collected closes its connection."""
+            def __init__(self): self.models = Models(self.state)
+            state = None
+            def __del__(self): self.models.closed[0] = True
+        class Models:
+            def __init__(self, _): self.closed = [False]
+            def get(self, model):
+                if self.closed[0]: raise RuntimeError('Cannot send a request, as the client has been closed.')
+        with patch('clipcompiler.gemini.client', side_effect=lambda key: ClosingClient()):
+            self.assertEqual(settings.validate_key(FAKE_KEY)['state'], 'ok')
 
 
 if __name__ == '__main__':
