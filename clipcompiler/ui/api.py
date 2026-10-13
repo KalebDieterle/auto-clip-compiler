@@ -14,7 +14,7 @@ import threading
 import time
 import webbrowser
 
-from .. import APP_NAME, __version__, gemini, job, paths, settings as config
+from .. import APP_NAME, __version__, batch, gemini, job, paths, settings as config
 from ..media import Cancelled, command, find_ffmpeg
 from ..reel import discover, split_parts
 from ..store import HashIndex, atomic_json, awake
@@ -48,9 +48,10 @@ def low_priority(on):
 
 
 class Api:
-    def __init__(self, server=None, judge_fn=None):
+    def __init__(self, server=None, judge_fn=None, client_factory=None):
         self._settings = config.load()
         self._server = server; self._window = None; self._judge_fn = judge_fn
+        self._client_factory = client_factory or gemini.client
         self._lock = threading.RLock(); self._events = []; self._seq = 0
         self._job = None; self._cancel = None; self._scan = None
         self._run_dir = None; self._run = None
@@ -185,34 +186,45 @@ class Api:
             clips = discover(source, lo, hi)
             self._emit({'type': 'scan', 'done': 0, 'total': len(clips)})
             rows = job.scan(clips, config.cache_dir(self._settings), self._hasher, emit=self._emit, cancel=cancel)
-            todo = [r for r in rows if not r['cached']]
+            pending = self._pending_batch_digests()
+            for r in rows: r['pending'] = not r['cached'] and r['digest'] in pending
+            todo = [r for r in rows if not r['cached'] and not r['pending']]
             self._scan = {'source': str(source), 'since': since, 'until': until, 'rows': rows}
-            self._emit({'type': 'scan_done', 'clips': len(rows), 'cached': len(rows)-len(todo), 'to_judge': len(todo),
+            self._emit({'type': 'scan_done', 'clips': len(rows), 'cached': sum(r['cached'] for r in rows), 'to_judge': len(todo),
+                        'in_batch': sum(r['pending'] for r in rows),
                         'unreadable': sum(r['digest'] is None for r in rows),
                         'gb': round(sum(r['size'] for r in rows)/1e9, 1),
                         'first': rows[-1]['when'] if rows else None, 'last': rows[0]['when'] if rows else None,
-                        'estimate_usd': round(gemini.estimate(len(todo)), 2)})
+                        'estimate_usd': round(gemini.estimate(len(todo)), 2),
+                        'estimate_batch_usd': round(gemini.estimate(len(todo), batch=True), 2),
+                        'batch_per_clip': batch.PER_CLIP})
         return self._start('scan', work)
 
     @safe
     def start_judge(self):
-        """Judge the scanned clips with the current settings, then open the review."""
+        """Judge the scanned clips with the current settings: live (then review), or submit a batch."""
         if not self._scan: return {'error': 'Scan your clips first.'}
         s = self._settings
         if not s.output: return {'error': 'Pick an output folder first.'}
-        rows = [r for r in self._scan['rows'] if r['digest']]
-        needs_key = any(not r['cached'] for r in rows)
+        # Clips already submitted in a batch that is still at Google are never sent again (no double paying).
+        pending = self._pending_batch_digests()
+        rows = [r for r in self._scan['rows'] if r['digest'] and (r['cached'] or r['digest'] not in pending)]
+        if not rows: return {'error': 'Every clip in this range is already in a batch at Google.'}
         key = config.get_key()
-        if needs_key and not key: return {'error': 'Add your Gemini API key in Settings first.'}
+        if any(not r['cached'] for r in rows) and not key: return {'error': 'Add your Gemini API key in Settings first.'}
         run_dir = Path(s.output)/datetime.datetime.now().strftime('Compilation %Y-%m-%d %H-%M-%S')
         run_dir.mkdir(parents=True)
-        target = s.target_minutes*60 if s.mode == 'reel' else None
-        run = {'created': datetime.datetime.now().isoformat(timespec='seconds'), 'status': 'judging',
+        batch_mode = s.judge_mode == 'batch' and any(not r['cached'] for r in rows)
+        run = {'created': datetime.datetime.now().isoformat(timespec='seconds'),
+               'status': 'batch_uploading' if batch_mode else 'judging', 'judge_mode': 'batch' if batch_mode else 'live',
                'source': self._scan['source'], 'since': self._scan['since'], 'until': self._scan['until'],
                'mode': s.mode, 'min_score': s.min_score, 'target_minutes': s.target_minutes,
-               'part_minutes': s.part_minutes, 'moments': [], 'decisions': {}, 'files': []}
+               'part_minutes': s.part_minutes, 'moments': [], 'decisions': {}, 'files': [],
+               'clips': [[r['when'], r['hint'], str(r['path'])] for r in rows]}
         with self._lock: self._run_dir, self._run = run_dir, run
         self._save_run()
+        if batch_mode: return self._submit_batch(run, run_dir, key)
+        target = s.target_minutes*60 if s.mode == 'reel' else None
 
         def work(cancel):
             scratch = run_dir/'.upload-proxies'; scratch.mkdir(exist_ok=True)
@@ -222,16 +234,143 @@ class Api:
                                   ffmpeg=self._ffmpeg[0], ffprobe=self._ffmpeg[1], emit=self._emit,
                                   cancel=cancel, judge_fn=self._judge_fn).run()
             scratch.rmdir() if scratch.exists() and not any(scratch.iterdir()) else None
-            cands = job.candidates(result['moments'], s.min_score)
-            keep = job.default_keep(cands, target)
-            for m in cands:
-                m['orig_start'], m['orig_end'] = m['start'], m['end']
-            with self._lock:
-                run.update(status='review', moments=cands, usage=result['usage'], stopped=result['stopped'],
-                           decisions={m['id']: {'keep': m['id'] in keep} for m in cands})
-            atomic_json(run_dir/'report.json', result['report']); self._save_run()
-            self._emit({'type': 'review_ready', 'moments': len(cands), 'stopped': result['stopped']})
+            self._finish_judging(run, run_dir, result, target)
         return self._start('judge', work)
+
+    def _finish_judging(self, run, run_dir, result, target):
+        """Shared by live and batch: merge replays, preselect, save, and open the review."""
+        cands = job.candidates(result['moments'], run['min_score'])
+        keep = job.default_keep(cands, target)
+        for m in cands:
+            m['orig_start'], m['orig_end'] = m['start'], m['end']
+        with self._lock:
+            run.update(status='review', moments=cands, usage=result['usage'], stopped=result['stopped'],
+                       decisions={m['id']: {'keep': m['id'] in keep} for m in cands})
+            self._run_dir, self._run = run_dir, run
+        atomic_json(run_dir/'report.json', result['report']); self._save_run()
+        self._emit({'type': 'review_ready', 'moments': len(cands), 'stopped': result['stopped'], 'folder': str(run_dir)})
+
+    # --- batch judging (half price; Google returns results within 24 h) ------------------------------
+
+    def _client(self, key=None):
+        return self._client_factory(key or config.get_key())
+
+    @staticmethod
+    def _run_clips(run):
+        return [(w, h, Path(p)) for w, h, p in run['clips']]
+
+    def _submit_batch(self, run, run_dir, key):
+        s = self._settings
+
+        def work(cancel):
+            gc = self._client(key)
+            try:
+                state = batch.submit(self._run_clips(run), run_dir/'batch', config.cache_dir(s), gc, model=s.model,
+                                     hasher=self._hasher, ffmpeg=self._ffmpeg[0], workers=max(4, s.workers),
+                                     max_usd=s.budget_usd or None, emit=self._emit, cancel=cancel)
+            except Cancelled:
+                with self._lock: run['status'] = 'cancelled'
+                self._save_run(); raise
+            if not state.get('job'):  # Everything was already judged: straight to review.
+                return self._collect_work(run, run_dir)(cancel)
+            with self._lock: run.update(status='batch_waiting', batch=self._batch_summary(state))
+            self._save_run()
+            self._emit({'type': 'batch_waiting', 'folder': str(run_dir), 'batch': run['batch']})
+        return self._start('batch', work)
+
+    def _pending_batch_digests(self):
+        """Content hashes of clips uploaded in batches that have not been collected yet."""
+        found = set()
+        if not self._settings.output or not Path(self._settings.output).is_dir(): return found
+        for f in Path(self._settings.output).glob('Compilation */batch/batch.json'):
+            try:
+                state = json.loads(f.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if not state.get('collected') and state.get('status') not in ('cancelled', 'nothing'):
+                found.update(state.get('clips', {}))
+        return found
+
+    @staticmethod
+    def _batch_summary(state):
+        return {'job': state.get('job'), 'clips': len(state['clips']), 'estimate_usd': state.get('estimate_usd'),
+                'submitted': state.get('submitted'), 'expires': batch.expires_at(state), 'status': state.get('status'),
+                'checked': state.get('checked'), 'failed': len(state.get('failed', [])),
+                'judged': state.get('judged'), 'usd': state.get('usd')}
+
+    def _target_run(self, folder):
+        """(run_dir, run) for a folder, or the open compilation. Reads from disk without opening it."""
+        if not folder or (self._run_dir and Path(folder) == self._run_dir):
+            return self._run_dir, self._run
+        folder = Path(folder)
+        return folder, json.loads((folder/'run.json').read_text(encoding='utf-8'))
+
+    @safe
+    def check_batch(self, folder=None):
+        """Ask Google how a waiting batch is doing; once it has finished, collect it and open the review."""
+        run_dir, run = self._target_run(folder)
+        if not run or run.get('status') != 'batch_waiting':
+            return {'status': run.get('status') if run else None, 'done': False}
+        state = batch.load(run_dir/'batch')
+        job_ = batch.refresh(state, run_dir/'batch', self._client())
+        run['batch'] = self._batch_summary(state)
+        atomic_json(run_dir/'run.json', run)
+        if run_dir == self._run_dir: self._run = run
+        done = job_.state.name in batch.DONE
+        collecting = False
+        if done and not self._job:
+            with self._lock: self._run_dir, self._run = run_dir, run
+            self._start('collect', self._collect_work(run, run_dir, job_)); collecting = True
+        return {'status': job_.state.name, 'done': done, 'collecting': collecting, 'batch': run['batch'],
+                'folder': str(run_dir)}
+
+    def _collect_work(self, run, run_dir, job_=None):
+        def work(cancel):
+            self._emit({'type': 'batch_collecting', 'folder': str(run_dir)})
+            state = batch.load(run_dir/'batch'); usd = 0.
+            if state and state.get('job'):
+                state = batch.collect(state, run_dir/'batch', self._client(), config.cache_dir(self._settings), job_)
+                usd = state['usd']
+                with self._lock: run['batch'] = self._batch_summary(state)
+            # Rebuild moments from the cache (no API calls); only failures are worth showing.
+            quiet = lambda e: self._emit(e) if e['type'] == 'clip' and e['status'] == 'failed' else None
+            result = job.JudgeJob(self._run_clips(run), config.cache_dir(self._settings), run_dir, cache_only=True,
+                                  hasher=self._hasher, ffprobe=self._ffmpeg[1], emit=quiet, cancel=cancel).run()
+            result['usage']['usd'] = usd
+            if state and state.get('job') and state.get('status') != 'JOB_STATE_SUCCEEDED':
+                result['stopped'] = 'batch_' + state['status'].replace('JOB_STATE_', '').lower()
+            target = run['target_minutes']*60 if run['mode'] == 'reel' else None
+            self._finish_judging(run, run_dir, result, target)
+        return work
+
+    @safe
+    def cancel_batch(self, folder=None):
+        """Cancel a batch at Google and delete its uploads. Nothing finished is charged."""
+        if self._job == 'batch': self.cancel(); return {'ok': True}  # Still uploading: the job cleans up.
+        run_dir, run = self._target_run(folder)
+        state = batch.load(run_dir/'batch')
+        if state: batch.cancel(state, run_dir/'batch', self._client())
+        run.update(status='cancelled', batch=self._batch_summary(state) if state else None)
+        atomic_json(run_dir/'run.json', run)
+        if run_dir == self._run_dir: self._run = run
+        return {'ok': True}
+
+    @safe
+    def resume_batch(self, folder=None):
+        """Finish an upload that was interrupted (app closed, PC slept); uploads already made are reused."""
+        run_dir, run = self._target_run(folder)
+        if run.get('status') not in ('batch_uploading', 'cancelled') or run.get('judge_mode') != 'batch':
+            return {'error': 'Nothing to resume.'}
+        key = config.get_key()
+        if not key: return {'error': 'Add your Gemini API key in Settings first.'}
+        state = batch.load(run_dir/'batch')
+        if state and state.get('job'): return {'error': 'This batch was already submitted.'}
+        if state and state.get('status') == 'cancelled':
+            state.pop('status'); batch.save(run_dir/'batch', state)
+        with self._lock:
+            run['status'] = 'batch_uploading'; self._run_dir, self._run = run_dir, run
+        self._save_run()
+        return self._submit_batch(run, run_dir, key)
 
     # --- review ------------------------------------------------------------------------------------
 
@@ -262,7 +401,7 @@ class Api:
     def _run_summary(self):
         if not self._run: return None
         return {k: self._run.get(k) for k in ('created', 'status', 'mode', 'min_score', 'target_minutes', 'part_minutes',
-                                               'usage', 'stopped', 'files')} | {'folder': str(self._run_dir),
+                                               'usage', 'stopped', 'files', 'judge_mode', 'batch')} | {'folder': str(self._run_dir),
                                                                                 'moments': len(self._run['moments'])}
 
     def _recent_runs(self):
@@ -272,7 +411,8 @@ class Api:
             try:
                 data = json.loads(f.read_text(encoding='utf-8'))
                 runs.append({'folder': str(f.parent), 'created': data['created'], 'status': data['status'],
-                             'moments': len(data['moments']), 'mode': data['mode'], 'files': data.get('files', [])})
+                             'moments': len(data['moments']), 'mode': data['mode'], 'files': data.get('files', []),
+                             'judge_mode': data.get('judge_mode', 'live'), 'batch': data.get('batch')})
             except (OSError, ValueError, KeyError):
                 continue
         return runs

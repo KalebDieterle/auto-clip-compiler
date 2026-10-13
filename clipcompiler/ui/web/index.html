@@ -98,6 +98,13 @@
               <button data-v="reel">One video</button><button data-v="parts">Split into parts</button><i class="seg-glider"></i>
             </div>
           </div>
+          <div class="field">
+            <label>Judging</label>
+            <div class="seg" id="judgeMode">
+              <button data-v="live">Live</button><button data-v="batch">Batch &middot; half price</button><i class="seg-glider"></i>
+            </div>
+            <p class="hint" id="judgeHint"></p>
+          </div>
           <div class="field two">
             <div><label for="length" id="lengthLabel">Length (min)</label><input type="number" id="length" min="1" max="600" step="1"></div>
             <div><label for="budget">Budget cap ($)</label><input type="number" id="budget" min="0" step="0.5"></div>
@@ -152,6 +159,32 @@
         </div>
       </div>
       <div class="banner" id="judgeBanner" hidden></div>
+    </section>
+
+    <!-- Batch -->
+    <section class="screen" data-screen="batch">
+      <header class="head"><h1>Batch judging</h1><p class="sub">Half price. Google judges your clips on its side and returns results within 24 hours, often in under an hour.</p></header>
+      <div class="panel batchpanel">
+        <ol class="bsteps" id="bSteps">
+          <li><i></i><b>Upload</b><span>PC needs to be on</span></li>
+          <li><i></i><b>Google judges</b><span>PC can be off</span></li>
+          <li><i></i><b>Review</b><span>results collected</span></li>
+        </ol>
+        <div class="bstate"><span class="pulse" id="bPulse"></span><b id="bState">Uploading clips</b></div>
+        <div class="bar" id="bBar"><i></i></div>
+        <div class="bstats">
+          <div><b id="bClips">-</b><span>clips</span></div>
+          <div><b id="bCost">-</b><span>estimated</span></div>
+          <div><b id="bSubmitted">-</b><span>submitted</span></div>
+          <div><b id="bExpires">-</b><span>Google gives up</span></div>
+        </div>
+        <div class="render-actions">
+          <button class="btn primary" id="bCheck">Check now</button>
+          <button class="btn primary" id="bResume" hidden>Resume upload</button>
+          <button class="btn ghost" id="bCancel">Cancel batch</button>
+        </div>
+        <p class="hint" id="bHint"></p>
+      </div>
     </section>
 
     <!-- Review -->

@@ -6,6 +6,7 @@
 |---|---|
 | `clipcompiler/gemini.py` | Prompt, schema, prices, 480p proxy, upload-judge-delete with retries |
 | `clipcompiler/reel.py` | Clip discovery, moments from judgments, replay dedupe, pick, split into parts |
+| `clipcompiler/batch.py` | Batch API: submit (resumable uploads), refresh, collect (idempotent), cancel; state in `<job>/batch.json` |
 | `clipcompiler/job.py` | `scan`, `JudgeJob`, `render_reel`, `render_parts`: cancellable, report through events |
 | `clipcompiler/render.py` | Frame-exact cuts, atomic publish (MP4 + manifest + FCPXML), progress + cancel |
 | `clipcompiler/media.py` | ffmpeg/ffprobe (no console window, cancellable), bundled-ffmpeg lookup |
@@ -41,7 +42,10 @@ $env:ACC_DEBUG = '1'                             # right-click > Inspect in the 
 - No network; Gemini is faked (`judge_fn`), clips are synthetic ffmpeg test patterns.
 - `tests/test_reel.py` includes a parity test that replays the real 2026-10-12 library plan from
   `%LOCALAPPDATA%\AutoClipCompiler-dev\parity\` when that fixture exists.
-- `tests/test_live.py` hits the real API (about $0.01): `$env:ACC_LIVE = '1'`.
+- `tests/test_batch.py` / `test_api_batch.py` run batch mode against `tests/fake_gemini.py`, an
+  in-memory Files + Batches API that returns results in the real REST shape.
+- `tests/test_live.py` hits the real API (about $0.02, the batch test waits for Google, usually ~10 min):
+  `$env:ACC_LIVE = '1'`.
 - UI screenshots without Python: inject `tests/ui/mock_bridge.js` before `app.js` (e.g. Playwright
   `addInitScript`) and open `clipcompiler/ui/web/index.html`.
 

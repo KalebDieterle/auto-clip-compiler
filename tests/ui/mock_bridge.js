@@ -6,7 +6,7 @@
   const events = []; let seq = 0, busy = null;
   const emit = (e) => events.push({ ...e, seq: ++seq, at: Date.now() / 1000 });
   const settings = { version: 1, onboarded: opt.onboarded, source: opt.onboarded ? 'D:\\Videos\\OBS Clips' : '',
-    output: opt.onboarded ? 'D:\\Videos\\Highlights' : '', cache_dir: '', mode: 'parts', target_minutes: 30,
+    output: opt.onboarded ? 'D:\\Videos\\Highlights' : '', cache_dir: '', mode: 'parts', judge_mode: opt.judgeMode || 'live', target_minutes: 30,
     part_minutes: 30, min_score: 7, budget_usd: 5, workers: 4, height: 1080, fps: 60, loudnorm: true,
     timestamp_overlay: false, model: 'gemini-flash-latest' };
   const reasons = ['Gets launched off the cliff by his own rocket and screams the whole way down',
@@ -48,11 +48,24 @@
       busy = 'scan'; let d = 0;
       const tick = () => { d = Math.min(2687, d + 400); emit({ type: 'scan', done: d, total: 2687 });
         if (d < 2687) return later(60, tick);
-        emit({ type: 'scan_done', clips: 2687, cached: 2397, to_judge: 290, unreadable: 0, gb: 61.4, first: 1779660000, last: 1791200000, estimate_usd: 1.31 });
+        emit({ type: 'scan_done', clips: 2687, cached: 2397, to_judge: 290, unreadable: 0, gb: 61.4, first: 1779660000, last: 1791200000, estimate_usd: 1.31, estimate_batch_usd: 0.66, batch_per_clip: 0.0022875 });
         busy = null; emit({ type: 'idle' }); };
       later(30, tick); return { ok: true, job: 'scan' };
     },
+    check_batch: async () => { run.batch.status = 'JOB_STATE_RUNNING'; run.batch.checked = '2026-10-13T14:31:00'; return { status: 'JOB_STATE_RUNNING', done: false, batch: run.batch }; },
+    cancel_batch: async () => { run.status = 'cancelled'; return { ok: true }; },
+    resume_batch: async () => ({ ok: true }),
     start_judge: async () => {
+      if (settings.judge_mode === 'batch') {
+        busy = 'batch'; Object.assign(run, { status: 'batch_uploading', judge_mode: 'batch', moments: 0, batch: { clips: 290 } }); let d = 0;
+        const tick = () => { d = Math.min(290, d + 9); emit({ type: 'batch_upload', done: d, total: 290 });
+          if (opt.hold && d >= opt.hold) return;
+          if (d < 290) return later(40, tick);
+          run.status = 'batch_waiting';
+          run.batch = { job: 'batches/abc', clips: 290, estimate_usd: 0.66, submitted: '2026-10-13T14:12:00', expires: '2026-10-15T14:12:00', status: 'JOB_STATE_PENDING' };
+          emit({ type: 'batch_waiting', batch: run.batch }); busy = null; emit({ type: 'idle' }); };
+        later(30, tick); return { ok: true, job: 'batch' };
+      }
       busy = 'judge'; emit({ type: 'judge_start', total: 60 }); let n = 0, usd = 0;
       const tick = () => {
         n++; const cached = n % 4 === 0; if (!cached) usd += 0.0046;

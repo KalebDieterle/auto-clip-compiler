@@ -30,7 +30,14 @@ shows an estimate before you start and stops at your budget cap.
 1. **New**: pick your clips folder and an output folder, optionally a date range, and choose
    *One video* (a set length of the best moments, newest clips first) or *Split into parts*
    (everything good, in order, cut into parts of about N minutes).
-2. **Judging**: watch progress, moments found and money spent. *Stop* keeps everything judged so far.
+2. **Judging**: choose **Live** or **Batch · half price** on the New screen.
+   - *Live*: results in minutes while you watch progress, moments found and money spent. *Stop* keeps
+     everything judged so far.
+   - *Batch*: half the price. The app uploads your clips (keep the PC on for that part), then Google
+     judges them on its side and returns results within 24 hours, usually much sooner. You can close
+     the app or turn off the PC meanwhile; it checks every 2 minutes while open and again when you
+     open it, then collects the results and opens the review. Batch judges every clip in the date
+     range (newest first, up to your budget cap). Clips waiting in a batch are never sent twice.
 3. **Review**: every moment with its score and Gemini's reason. Click to watch it.
    - <kbd>K</kbd> keep, <kbd>X</kbd> cut, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> move, <kbd>Space</kbd> play
    - Drag the purple handles, or press <kbd>[</kbd> / <kbd>]</kbd> at the playhead, to trim.

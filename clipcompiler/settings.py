@@ -26,6 +26,7 @@ class Settings:
     output: str = ''
     cache_dir: str = ''              # Empty: the app's own cache folder.
     mode: str = 'reel'               # 'reel' = one video of target_minutes; 'parts' = whole range split into parts.
+    judge_mode: str = 'live'         # 'live' = results in minutes; 'batch' = Batch API, half price, up to 24 h.
     target_minutes: float = 30.
     part_minutes: float = 30.
     min_score: int = 7
@@ -39,6 +40,7 @@ class Settings:
 
     def problems(self):
         checks = [(self.mode in ('reel', 'parts'), 'mode must be reel or parts'),
+                  (self.judge_mode in ('live', 'batch'), 'judging must be live or batch'),
                   (1 <= self.min_score <= 10, 'minimum score must be 1-10'),
                   (1 <= self.target_minutes <= 600, 'reel length must be 1-600 minutes'),
                   (1 <= self.part_minutes <= 600, 'part length must be 1-600 minutes'),

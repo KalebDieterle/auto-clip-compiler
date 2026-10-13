@@ -76,7 +76,7 @@ const onEnter = {};
 function go(name) {
   S.screen = name;
   $$('.screen').forEach((s) => s.classList.toggle('on', s.dataset.screen === name));
-  const tab = { judging: 'home', render: 'review', welcome: null }[name] ?? name;
+  const tab = { judging: 'home', batch: 'review', render: 'review', welcome: null }[name] ?? name;
   $$('.nav').forEach((n) => n.classList.toggle('on', n.dataset.go === tab));
   $('.rail nav').style.visibility = name === 'welcome' ? 'hidden' : '';
   requestAnimationFrame(() => $$('.screen.on .seg').forEach((el) => seg(el)));
@@ -85,6 +85,7 @@ function go(name) {
 $$('.nav').forEach((n) => n.addEventListener('click', () => {
   if (n.dataset.go === 'home' && S.busy === 'judge') return go('judging');
   if (n.dataset.go === 'review' && S.busy === 'render') return go('render');
+  if (n.dataset.go === 'review' && isBatchRun(S.state?.run)) return go('batch');
   go(n.dataset.go);
 }));
 $$('[data-url]').forEach((b) => b.addEventListener('click', () => call('open_url', b.dataset.url)));
@@ -110,6 +111,9 @@ const STOP_TEXT = {
   auth: () => 'Google rejected the API key. Replace it in Settings.',
   target: () => 'Found enough moments for the target length.',
   cancelled: () => 'Stopped. Everything judged so far is saved and will not be paid for again.',
+  batch_expired: () => 'Google did not finish this batch within 48 hours, so nothing was charged. Run it again, or use Live.',
+  batch_failed: () => 'Google reported the batch as failed. Nothing was charged for unfinished clips; try again or use Live.',
+  batch_cancelled: () => 'The batch was cancelled. Clips Google finished first are saved.',
 };
 
 function handle(e) {
@@ -125,12 +129,17 @@ function handle(e) {
     case 'part_done': return partDone(e);
     case 'render_done': return renderDone(e);
     case 'render_cancelled': return renderStopped('Stopped. Earlier files were not touched.');
+    case 'batch_upload': return batchUpload(e);
+    case 'batch_waiting': refreshState().then(() => { if (S.screen === 'batch') paintBatch(); }); return;
+    case 'batch_collecting': return batchCollecting(e);
+    case 'batch_cancelled': refreshState().then(paintBatch); return;
     case 'scan_cancelled': return;
     case 'error':
       toast(e.message, 'bad');
       if (e.job === 'render') renderStopped(e.message);
       if (e.job === 'scan') { $('#scanState').textContent = e.message; $('#scanBar').hidden = true; }
       if (e.job === 'judge') banner(e.message, 'bad');
+      if (e.job === 'batch' || e.job === 'collect') { $('#bHint').textContent = e.message; refreshState().then(paintBatch); }
       return;
     case 'idle':
       refreshState();
@@ -199,6 +208,7 @@ onEnter.home = () => {
   const s = S.state.settings;
   setFolder($('#srcPick'), s.source); setFolder($('#outPick'), s.output);
   seg($('#mode'), s.mode); modeLabels(s.mode);
+  seg($('#judgeMode'), s.judge_mode); judgeHint(s.judge_mode);
   $('#length').value = s.mode === 'reel' ? s.target_minutes : s.part_minutes;
   $('#budget').value = s.budget_usd;
   $('#minScore').value = s.min_score; $('#minScoreOut').textContent = s.min_score; fillRange($('#minScore'));
@@ -223,6 +233,12 @@ onSeg($('#mode'), async (v) => {
   const s = await saveSettings({ mode: v });
   $('#length').value = v === 'reel' ? s.target_minutes : s.part_minutes; updateStart();
 });
+const JUDGE_HINT = {
+  live: 'Results in minutes while you watch. One video stops judging once it has enough.',
+  batch: 'Half price. Google returns results within 24 hours, often under an hour. Your PC only needs to be on while clips upload. Judges every clip in the range.',
+};
+function judgeHint(v) { $('#judgeHint').textContent = JUDGE_HINT[v]; }
+onSeg($('#judgeMode'), async (v) => { judgeHint(v); await saveSettings({ judge_mode: v }); paintEstimate(); updateStart(); });
 $('#length').addEventListener('change', async (e) => {
   const v = Math.min(600, Math.max(1, Number(e.target.value) || 30)); e.target.value = v;
   await saveSettings(S.state.settings.mode === 'reel' ? { target_minutes: v } : { part_minutes: v }); updateStart();
@@ -255,9 +271,17 @@ function scanDone(e) {
   if (!e.clips) { $('#scanState').textContent = 'No video files found in this folder for these dates.'; $('#scanStats').hidden = true; updateStart(); return; }
   $('#scanState').textContent = ''; $('#scanStats').hidden = false;
   animateNumber($('#sClips'), e.clips); animateNumber($('#sCached'), e.cached); animateNumber($('#sTodo'), e.to_judge);
-  animateNumber($('#sCost'), e.estimate_usd, money);
-  $('#scanRange').textContent = `${day(e.first)} to ${day(e.last)} · ${e.gb} GB` + (e.unreadable ? ` · ${e.unreadable} unreadable` : '');
+  paintEstimate();
+  $('#scanRange').textContent = `${day(e.first)} to ${day(e.last)} · ${e.gb} GB` + (e.unreadable ? ` · ${e.unreadable} unreadable` : '')
+    + (e.in_batch ? ` · ${num(e.in_batch)} waiting in a batch` : '');
   updateStart();
+}
+function batchMode() { return S.state.settings.judge_mode === 'batch'; }
+function estimate() { return S.scan ? (batchMode() ? S.scan.estimate_batch_usd : S.scan.estimate_usd) : 0; }
+function paintEstimate() {
+  if (!S.scan) return;
+  animateNumber($('#sCost'), estimate(), money);
+  $('#sCost').nextElementSibling.textContent = batchMode() ? 'estimated, batch price' : 'estimated';
 }
 function updateStart() {
   const btn = $('#startBtn'), hint = $('#startHint'), s = S.state.settings, e = S.scan;
@@ -266,26 +290,40 @@ function updateStart() {
   btn.disabled = !s.output;
   if (!s.output) hint.textContent = 'Choose an output folder.';
   if (e.to_judge === 0) { btn.textContent = 'Build from saved judgments'; return; }
-  const upTo = s.mode === 'reel' ? 'up to ' : '';
-  btn.textContent = `Judge ${num(e.to_judge)} clips · ${upTo}~${money(e.estimate_usd)}`;
+  const upTo = s.mode === 'reel' && !batchMode() ? 'up to ' : '';
+  btn.textContent = `${batchMode() ? 'Submit' : 'Judge'} ${num(e.to_judge)} clips · ${upTo}~${money(estimate())}`;
+  const perClip = batchMode() ? e.batch_per_clip : e.batch_per_clip * 2;
   if (!S.state.key.present) { btn.disabled = true; hint.textContent = 'Add your Gemini API key in Settings first.'; }
-  else if (s.budget_usd && e.estimate_usd > s.budget_usd) hint.textContent = `Your ${money(s.budget_usd)} cap stops judging after roughly ${num(Math.floor(s.budget_usd / 0.0046))} clips.`;
-  else if (s.mode === 'reel') hint.textContent = 'Judging stops once there is enough for the video, newest clips first.';
+  else if (s.budget_usd && estimate() > s.budget_usd) {
+    const fit = Math.floor(s.budget_usd / perClip);
+    hint.textContent = batchMode() ? `Your ${money(s.budget_usd)} cap fits the newest ${num(fit)} clips; the rest are left for later.`
+      : `Your ${money(s.budget_usd)} cap stops judging after roughly ${num(fit)} clips.`;
+    if (batchMode()) btn.textContent = `Submit ${num(Math.min(fit, e.to_judge))} clips · ~${money(Math.min(fit, e.to_judge) * perClip)}`;
+  }
+  else if (s.mode === 'reel' && !batchMode()) hint.textContent = 'Judging stops once there is enough for the video, newest clips first.';
 }
 $('#startBtn').addEventListener('click', async () => {
   const e = S.scan, s = S.state.settings;
-  const spend = Math.min(e.estimate_usd, s.budget_usd || Infinity);
-  if (spend >= 1 && !await confirmBox('Start judging?', `This can spend up to about ${money(spend)} on your Google account. Judged clips are saved, so they are never paid for twice.`, 'Start')) return;
-  await call('start_judge'); go('judging');
+  const spend = Math.min(estimate(), s.budget_usd || Infinity);
+  const what = batchMode() ? 'Submit this batch?' : 'Start judging?';
+  if (spend >= 1 && !await confirmBox(what, `This can spend up to about ${money(spend)} on your Google account. Judged clips are saved, so they are never paid for twice.`, batchMode() ? 'Submit' : 'Start')) return;
+  const mode = batchMode() && e.to_judge > 0;
+  await call('start_judge'); S.scan = null;
+  if (mode) { setBusy('batch'); await refreshState(); go('batch'); } else go('judging');
 });
 
 function renderRecent() {
   const runs = S.state?.recent || [];
   $('#recentPanel').hidden = !runs.length;
-  $('#recentList').innerHTML = runs.map((r, i) => `<li data-i="${i}"><div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${r.moments} moments · ${r.mode === 'reel' ? 'one video' : 'parts'}</span></div><span class="pill ${r.status}">${r.status}</span></li>`).join('');
+  const label = { batch_waiting: 'at Google', batch_uploading: 'uploading', judging: 'stopped' };
+  $('#recentList').innerHTML = runs.map((r, i) => {
+    const what = r.status.startsWith('batch') || (r.judge_mode === 'batch' && !r.moments) ? `batch of ${r.batch?.clips ?? '?'} clips` : `${r.moments} moments`;
+    return `<li data-i="${i}"><div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${what} · ${r.mode === 'reel' ? 'one video' : 'parts'}</span></div><span class="pill ${r.status}">${label[r.status] || r.status}</span></li>`;
+  }).join('');
   $$('#recentList li').forEach((li) => li.addEventListener('click', async () => {
     if (S.busy) return toast('Wait for the current job to finish.');
-    S.review = await call('open_run', runs[li.dataset.i].folder); refreshState(); go('review');
+    S.review = await call('open_run', runs[li.dataset.i].folder); await refreshState();
+    go(isBatchRun(S.state.run) ? 'batch' : 'review');
   }));
 }
 
@@ -337,6 +375,8 @@ onEnter.judging = () => { $('#cancelJudge').disabled = false; };
 
 async function reviewReady(e) {
   S.scan = null;
+  if (S.screen === 'batch' || S.collecting) toast('Batch results are in. Review your moments.');
+  S.collecting = false;
   if (e.stopped && e.stopped !== 'target') toast(STOP_TEXT[e.stopped]?.('') || e.stopped);
   S.review = await call('get_review'); await refreshState(); go('review');
 }
@@ -588,5 +628,73 @@ async function boot() {
   go(S.state.settings.onboarded ? 'home' : 'welcome');
   if (!S.state.ffmpeg) toast('FFmpeg is missing, so clips cannot be read. Reinstall the app.', 'bad');
   poll();
+  checkWaiting(); setInterval(checkWaiting, 120000);
 }
 if (window.pywebview?.api) boot(); else window.addEventListener('pywebviewready', boot, { once: true });
+
+// ---------- batch ----------
+function isBatchRun(run) { return !!run && ['batch_waiting', 'batch_uploading'].includes(run.status) || (run?.judge_mode === 'batch' && run?.status === 'cancelled' && !run?.moments); }
+const BATCH_STATE = {
+  JOB_STATE_PENDING: 'Queued at Google', JOB_STATE_RUNNING: 'Google is judging your clips',
+  JOB_STATE_SUCCEEDED: 'Finished', JOB_STATE_FAILED: 'Google reported a failure', JOB_STATE_EXPIRED: 'Expired after 48 hours',
+  JOB_STATE_CANCELLED: 'Cancelled',
+};
+const shortTime = (iso) => iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '-';
+function steps(i) { $$('#bSteps li').forEach((li, j) => { li.classList.toggle('done', j < i); li.classList.toggle('on', j === i); }); }
+function batchState(text, pulse = '') { $('#bState').textContent = text; $('#bPulse').className = `pulse ${pulse}`; }
+
+onEnter.batch = () => paintBatch();
+function paintBatch() {
+  if (S.screen !== 'batch') return;
+  const run = S.state.run; if (!run) return go('home');
+  const b = run.batch || {};
+  $('#bClips').textContent = b.clips != null ? num(b.clips) : '-';
+  $('#bCost').textContent = b.usd != null ? money(b.usd) : b.estimate_usd != null ? '~' + money(b.estimate_usd) : '-';
+  $('#bCost').nextElementSibling.textContent = b.usd != null ? 'charged' : 'estimated';
+  $('#bSubmitted').textContent = shortTime(b.submitted); $('#bExpires').textContent = shortTime(b.expires);
+  const uploading = run.status === 'batch_uploading', waiting = run.status === 'batch_waiting', cancelled = run.status === 'cancelled';
+  $('#bBar').hidden = !uploading;
+  $('#bCheck').hidden = !waiting; $('#bCancel').hidden = !(waiting || (uploading && S.busy === 'batch'));
+  $('#bResume').hidden = !((uploading && S.busy !== 'batch') || (cancelled && !b.job));
+  if (uploading) {
+    steps(0);
+    if (S.busy === 'batch') batchState('Uploading clips', '');
+    else { batchState('Upload was interrupted', 'idle'); $('#bHint').textContent = 'Uploads already made are reused when you resume.'; }
+  } else if (waiting) {
+    steps(1); batchState(BATCH_STATE[b.status] || 'Waiting on Google', '');
+    $('#bHint').textContent = `You can close the app or turn off the PC. It checks automatically every 2 minutes while open, and when you open it again.${b.checked ? ' Last checked ' + shortTime(b.checked) + '.' : ''}`;
+  } else if (cancelled) {
+    steps(-1); batchState('Cancelled', 'idle'); $('#bHint').textContent = 'Uploads were deleted from Google. Nothing unfinished was charged.';
+  }
+}
+function batchUpload(e) {
+  if (S.screen !== 'batch') { if (S.state.run) S.state.run.status = 'batch_uploading'; go('batch'); }
+  $('#bResume').hidden = true; $('#bCancel').hidden = false; $('#bCheck').hidden = true; steps(0);
+  $('#bBar').hidden = false; $('#bBar i').style.width = (e.total ? e.done / e.total * 100 : 0) + '%';
+  batchState(`Uploading clips · ${num(e.done)} of ${num(e.total)}`);
+  $('#bClips').textContent = num(e.total);
+  $('#bHint').textContent = e.capped ? `${num(e.capped)} older clips are left out to stay within your budget cap.` : 'Keep the PC on until the upload finishes.';
+}
+function batchCollecting() {
+  S.collecting = true;
+  if (S.screen === 'batch') { steps(2); batchState('Collecting results', 'good'); $('#bBar').hidden = true; $('#bCheck').hidden = true; $('#bCancel').hidden = true; }
+}
+async function checkWaiting() {
+  const waiting = (S.state?.recent || []).filter((r) => r.status === 'batch_waiting');
+  for (const r of waiting) {
+    const res = await S.api.check_batch(r.folder);
+    if (res.collecting) { toast('A batch finished at Google. Collecting results...'); batchCollecting(); }
+    else if (res.done && S.busy) toast('A batch finished; results will be collected when the current job ends.');
+  }
+  if (waiting.length) { await refreshState(); paintBatch(); }
+}
+$('#bCheck').addEventListener('click', async () => {
+  $('#bCheck').disabled = true;
+  const r = await call('check_batch', S.state.run.folder).finally(() => { $('#bCheck').disabled = false; });
+  if (r.collecting) batchCollecting(); else { await refreshState(); paintBatch(); toast(BATCH_STATE[r.status] || r.status); }
+});
+$('#bCancel').addEventListener('click', async () => {
+  if (!await confirmBox('Cancel this batch?', 'Uploads are deleted from Google. Clips Google already finished are kept; nothing unfinished is charged.', 'Cancel batch')) return;
+  await call('cancel_batch', S.state.run.folder); await refreshState(); paintBatch();
+});
+$('#bResume').addEventListener('click', async () => { await call('resume_batch', S.state.run.folder); await refreshState(); paintBatch(); });
