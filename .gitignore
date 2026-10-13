@@ -15,3 +15,8 @@ Thumbs.db
 # Local run logs
 *.log
 
+
+# Packaging output
+build/
+dist/
+packaging/ffmpeg/

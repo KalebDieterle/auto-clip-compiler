@@ -1,16 +1,4 @@
-# Analysis
-faster-whisper
-huggingface_hub
-numpy
-Pillow
-scipy
-psutil
-# Optional YAMNet laughter evidence (setup_models.py --yamnet). TensorFlow needs Python <=3.12.
-tensorflow
-tensorflow-hub
-setuptools<81
-# Local review page
-fastapi
-uvicorn
-# Tests (fastapi.testclient)
-httpx
+# Runtime (the app and the tools\ CLI)
+google-genai>=2.29
+keyring>=25
+pywebview>=6.2

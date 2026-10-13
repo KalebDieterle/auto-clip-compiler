@@ -12,18 +12,17 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import datetime
 import json
-import os
 from pathlib import Path
 import sys
 import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from clipcompiler.store import atomic_json, file_hash  # noqa: E402
-from gemini_reel import PROMPT, PROMPT_VERSION, cost, discover, proxy  # noqa: E402
-from gemini_test import SCHEMA  # noqa: E402
-
-BATCH_DISCOUNT = .5
+from clipcompiler import gemini, paths  # noqa: E402
+from clipcompiler.gemini import BATCH_DISCOUNT, PROMPT, PROMPT_VERSION, SCHEMA, cost, estimate, proxy  # noqa: E402
+from clipcompiler.reel import discover  # noqa: E402
+from clipcompiler.store import HashIndex, atomic_json  # noqa: E402
+from gemini_reel import api_key, default_cache  # noqa: E402
 DONE = {'JOB_STATE_SUCCEEDED', 'JOB_STATE_FAILED', 'JOB_STATE_CANCELLED', 'JOB_STATE_EXPIRED'}
 
 
@@ -45,8 +44,7 @@ def request_line(key, file_uri):
 
 
 def client():
-    from google import genai
-    return genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+    return gemini.client(api_key())
 
 
 def load(job_dir):
@@ -70,13 +68,14 @@ def submit(args):
     state = state or {'created': datetime.datetime.now().isoformat(timespec='seconds'), 'model': args.model,
                       'prompt': PROMPT_VERSION, 'clips': {}}
     lock = threading.Lock(); scratch = job_dir/'.proxies'; scratch.mkdir(exist_ok=True)
+    hasher = HashIndex(paths.hash_index_path())
     gc = client()
     print(f'{len(clips)} clips in range; hashing and skipping already-judged ones...', flush=True)
 
     def prepare(clip):
         _, _, path = clip
         try:
-            digest = file_hash(path)
+            digest = hasher(path)
             if (cache/f'{digest}.json').exists() or digest in state['clips']:
                 return 'skip'
             small = proxy(path, scratch)
@@ -98,7 +97,7 @@ def submit(args):
             print(f'  {path.name}: FAILED {exc}', flush=True); return 'failed'
 
     results = list(ThreadPoolExecutor(max_workers=args.workers).map(prepare, clips))
-    save(job_dir, state)
+    hasher.save(); save(job_dir, state)
     print(f"uploaded {results.count('uploaded')}, already judged {results.count('skip')}, failed {results.count('failed')}", flush=True)
     if not state['clips']:
         print('Nothing to judge.'); return
@@ -119,7 +118,7 @@ def submit(args):
     job = gc.batches.create(model=args.model, src=src.name, config={'display_name': f'clip-batch-{job_dir.name}'})
     state.update(job=job.name, requests_file=src.name, submitted=datetime.datetime.now().isoformat(timespec='seconds'))
     save(job_dir, state)
-    est = len(state['clips'])*cost({'input_tokens': 2850, 'output_tokens': 200, 'thinking_tokens': 450})*BATCH_DISCOUNT
+    est = estimate(len(state['clips']), batch=True)
     print(f"Submitted {job.name}: {len(state['clips'])} clips, estimated ${est:.2f}. The PC can be turned off now.", flush=True)
 
 
@@ -177,12 +176,13 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     for name in ('submit', 'status', 'collect'):
         s = sub.add_parser(name); s.add_argument('--job-dir', required=True)
-        s.add_argument('--cache', default=r'C:\Users\<user>\Videos\Highlights\gemini-cache')
+        s.add_argument('--cache', default=None, help='Judgment cache dir (default: the app cache)')
         if name == 'submit':
             s.add_argument('--source', required=True); s.add_argument('--since'); s.add_argument('--until')
             s.add_argument('--max-clips', type=int, default=5000); s.add_argument('--workers', type=int, default=6)
-            s.add_argument('--model', default='gemini-flash-latest')
+            s.add_argument('--model', default=gemini.DEFAULT_MODEL)
     args = p.parse_args()
+    args.cache = args.cache or str(default_cache())
     {'submit': submit, 'status': status, 'collect': collect}[args.command](args)
 
 

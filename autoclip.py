@@ -1,6 +1,6 @@
-﻿#!/usr/bin/env python3
-"""Auto Clip Compiler entry point; internal modules live in clipcompiler/."""
-from clipcompiler.cli import main
+#!/usr/bin/env python3
+"""Auto Clip Compiler desktop app. The command-line tools live in tools/."""
+from clipcompiler.ui.main import main
 
-if __name__ == '__main__':
-    raise SystemExit(main())
+if __name__ == "__main__":
+    main()

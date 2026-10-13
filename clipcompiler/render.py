@@ -7,6 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
+import threading
 import uuid
 import xml.etree.ElementTree as ET
 
@@ -127,7 +128,9 @@ def verify_output(path, expected, ffprobe, fps):
     return meta
 
 
-def publish(items, root, settings, partial=False, omissions=()):
+def publish(items, root, settings, partial=False, omissions=(), on_progress=None, cancel=None):
+    """Render to a new unique folder. on_progress(done, total) fires per encoded segment; setting the
+    `cancel` Event kills ffmpeg and raises media.Cancelled, leaving only a `.pending-*` folder marked failed."""
     if not items: raise ValueError('No selected moments to render')
     root=Path(root); media_preflight(root,settings['ffmpeg'],settings['ffprobe'],settings.get('min_free_gb',2))
     fps,height=settings['fps'],settings['render_height']
@@ -136,10 +139,11 @@ def publish(items, root, settings, partial=False, omissions=()):
         source=Path(c['source_path'])
         if not source.is_file(): raise FileNotFoundError(source)
     # Validate each unique content identity immediately before rendering saved decisions.
+    hasher=settings.get('hasher') or file_hash
     checked=set()
     for c in items:
         if c['source_path'] in checked: continue
-        if c.get('source_hash') and file_hash(Path(c['source_path'])) != c['source_hash']:
+        if c.get('source_hash') and hasher(Path(c['source_path'])) != c['source_hash']:
             raise ValueError(f'Source changed since analysis: {c["source_path"]}')
         checked.add(c['source_path'])
     token=datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8]
@@ -165,18 +169,25 @@ def publish(items, root, settings, partial=False, omissions=()):
                  # Optional per-segment loudness normalization, so a long reel holds one volume.
                  '-af','loudnorm=I=-16:TP=-1.5:LRA=11,apad' if settings.get('loudnorm') else 'apad',
                  '-movflags','+faststart',dest]
-        command(args); verify_output(dest,duration,settings['ffprobe'],fps)
+        command(args,cancel=cancel); verify_output(dest,duration,settings['ffprobe'],fps)
+        if on_progress:
+            with progress_lock:
+                done[0]+=1; on_progress(done[0],len(items))
         return dest
+    progress_lock=threading.Lock(); done=[0]
     try:
         if settings.get('render',True):
-            with ThreadPoolExecutor(max_workers=settings.get('workers',2)) as executor:
+            executor=ThreadPoolExecutor(max_workers=settings.get('workers',2))
+            try:
                 segments=list(executor.map(encode,enumerate(items)))
+            finally:
+                executor.shutdown(cancel_futures=True)  # One failure must not encode the whole queue first.
             listing=work/'concat.txt'
             # Relative numeric paths avoid drive/apostrophe escaping entirely.
             listing.write_text(''.join(f"file '{p.name}'\n" for p in segments),encoding='utf-8')
             destination=staging/('Partial_highlights.mp4' if partial else 'Combined_highlights.mp4')
             command([settings['ffmpeg'],'-v','error','-y','-f','concat','-safe','1','-i',listing,
-                     '-c','copy','-movflags','+faststart',destination])
+                     '-c','copy','-movflags','+faststart',destination],cancel=cancel)
             verify_output(destination,sum(c['end']-c['start'] for c in items),settings['ffprobe'],fps)
         manifest(staging/'manifest.csv',items)
         if settings.get('resolve'): fcpxml(staging/'Combined.fcpxml',items,fps,height)
@@ -187,5 +198,6 @@ def publish(items, root, settings, partial=False, omissions=()):
         os.rename(staging,final)  # Same-volume atomic directory publication; unique target.
         return final
     except BaseException as exc:
-        atomic_json(staging/'render.json',{'status':'failed','error':str(exc),'partial':partial})
+        atomic_json(staging/'render.json',{'status':'failed','error':str(exc) or type(exc).__name__,'partial':partial})
+        shutil.rmtree(work,ignore_errors=True)  # Encoded segments can be gigabytes; never strand them.
         raise
