@@ -86,7 +86,7 @@ kbd { font: 11px/1 ui-monospace, "Cascadia Mono", monospace; padding: 3px 5px; b
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
 
 /* Controls */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid transparent; border-radius: 10px;
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; border: 1px solid transparent; border-radius: 10px;
   padding: 9px 16px; cursor: pointer; font-weight: 600; transition: transform var(--fast) var(--ease), background var(--fast), border-color var(--fast), box-shadow var(--fast), opacity var(--fast); }
 .btn:active:not(:disabled) { transform: scale(.97); }
 .btn:disabled { opacity: .4; cursor: default; }
