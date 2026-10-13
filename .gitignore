@@ -11,3 +11,7 @@ install.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local run logs
+*.log
+

@@ -1,11 +1,16 @@
+# Analysis
+faster-whisper
+huggingface_hub
+numpy
+Pillow
+scipy
+psutil
+# Optional YAMNet laughter evidence (setup_models.py --yamnet). TensorFlow needs Python <=3.12.
 tensorflow
 tensorflow-hub
 setuptools<81
-
-numpy
-opencv-python
-pytesseract
-scipy
-pandas
-tqdm
-faster-whisper
+# Local review page
+fastapi
+uvicorn
+# Tests (fastapi.testclient)
+httpx
