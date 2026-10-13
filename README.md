@@ -130,6 +130,15 @@ Windows Settings > Apps > Installed apps > Auto Clip Compiler > Uninstall. You'l
 also delete your settings, saved judgments and the stored API key; keep them if you might reinstall,
 since saved judgments are never paid for again. Your clips and finished compilations are never touched.
 
+## License
+
+Auto Clip Compiler is released under the [MIT License](LICENSE).
+
+The installer also bundles third-party software under its own licenses: [FFmpeg](https://ffmpeg.org/legal.html)
+(GPL; its license is included as `ffmpeg\FFMPEG-LICENSE.txt` in the install folder) and the
+[Python runtime](https://docs.python.org/3/license.html) (PSF License), plus the Python packages
+listed in `requirements.txt`, each under its own license.
+
 ---
 
 **Developers:** architecture, tests, the command-line tools and how to build the installer are in

@@ -53,7 +53,7 @@ $app = Join-Path $out 'app'
 New-Item -ItemType Directory -Force $app | Out-Null
 Copy-Item -Recurse clipcompiler (Join-Path $app 'clipcompiler')
 Get-ChildItem $app -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
-Copy-Item packaging\app.ico $out
+Copy-Item packaging\app.ico, LICENSE $out
 
 Write-Host 'ffmpeg...' -ForegroundColor Cyan
 $ffmpegDir = if ($env:ACC_FFMPEG_DIR) { $env:ACC_FFMPEG_DIR } else { Split-Path (Get-Command ffmpeg).Source }
