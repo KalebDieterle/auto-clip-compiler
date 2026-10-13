@@ -20,3 +20,4 @@ Thumbs.db
 build/
 dist/
 packaging/ffmpeg/
+packaging/cache/

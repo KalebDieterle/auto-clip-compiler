@@ -1,3 +1,0 @@
--r requirements.txt
-# Packaging (packaging\build.ps1)
-pyinstaller>=6.11

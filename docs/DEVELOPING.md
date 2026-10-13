@@ -15,7 +15,7 @@
 | `clipcompiler/paths.py` | App data dirs; `ACC_HOME` overrides the root (tests, portable runs) |
 | `clipcompiler/ui/` | `api.py` (the JS bridge), `server.py` (loopback UI + preview server), `main.py`, `web/` |
 | `tools/` | CLI: `gemini_reel.py` (live judging + render) and `gemini_batch.py` (Batch API, half price) |
-| `packaging/` | PyInstaller spec, Inno Setup script, icon, `build.ps1` |
+| `packaging/` | `build.ps1` (assembles the signed-Python app folder), Inno Setup script, icon |
 
 Data lives in `%LOCALAPPDATA%\AutoClipCompiler\` (`gemini-cache\`, `previews\`, `hash-index.json`,
 `logs\`) and `%APPDATA%\AutoClipCompiler\settings.json`. The judgment cache is keyed by each clip's
@@ -27,7 +27,7 @@ SHA-256, so it survives renames and is shared by the app and the CLI. Each compi
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 winget install Gyan.FFmpeg
 .\.venv\Scripts\python.exe autoclip.py          # the app
 $env:ACC_DEBUG = '1'                             # right-click > Inspect in the window
@@ -55,10 +55,25 @@ $env:ACC_DEBUG = '1'                             # right-click > Inspect in the 
 powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 ```
 
-Runs the tests, stages `ffmpeg.exe`/`ffprobe.exe` from PATH (or `$env:ACC_FFMPEG_DIR`), builds
-`dist\AutoClipCompiler\` with PyInstaller, launches it in self-test mode (`ACC_SELFTEST=1`: checks the
-page booted through the bridge, the bundled ffmpeg and the Credential Manager backend), then builds
-`dist\AutoClipCompiler-Setup-<version>.exe` with Inno Setup 6 (`winget install JRSoftware.InnoSetup --scope user`).
+There is deliberately **no exe of our own**. Windows Smart App Control blocks unsigned executables it
+has no reputation for (a PyInstaller exe was blocked on Kaleb's PC on 2026-10-13), and it has no
+"run anyway". So the app ships as:
+
+| Folder | Contents |
+|---|---|
+| `python\` | The official python.org embeddable package matching the venv's version (build fails unless every binary is signed by the PSF or Microsoft). `python3xx._pth` points at `..\app` and `..\site-packages`. |
+| `site-packages\` | `pip install --target` of `requirements.txt`, pinned to the venv's versions: the same PyPI files everyone uses. |
+| `app\` | The `clipcompiler` package, precompiled. |
+| `ffmpeg\` | `ffmpeg.exe`, `ffprobe.exe` from PATH (or `$env:ACC_FFMPEG_DIR`) and the license. |
+
+The Start menu shortcut runs `python\pythonw.exe -m clipcompiler.ui.main` with `app.ico` and
+AppUserModelID `KalebDieterle.AutoClipCompiler`, which the app also sets at runtime so the taskbar shows
+our icon. `build.ps1` runs the tests, assembles `dist\AutoClipCompiler\`, launches it in self-test mode
+(`ACC_SELFTEST=1`: page booted through the bridge, bundled ffmpeg, Credential Manager, window icon), then
+builds `dist\AutoClipCompiler-Setup-<version>.exe` with Inno Setup 6
+(`winget install JRSoftware.InnoSetup --scope user`). The Setup.exe itself is still unsigned; it passed
+Smart App Control on 2026-10-13, but that verdict is per file and can change. Code signing is the only
+complete fix.
 
 ## CLI
 

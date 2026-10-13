@@ -5,7 +5,10 @@
   #define AppVersion "0.0.0"
 #endif
 #define AppName "Auto Clip Compiler"
-#define AppExe "AutoClipCompiler.exe"
+#define AppId_ "KalebDieterle.AutoClipCompiler"
+; No exe of our own: Python's signed pythonw.exe runs the app (Smart App Control friendly).
+#define Launcher "{app}\python\pythonw.exe"
+#define LaunchArgs "-m clipcompiler.ui.main"
 
 [Setup]
 AppId={{6B1F7E2C-3D84-4C1B-9A57-2E0C9D5A41F3}
@@ -22,7 +25,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=AutoClipCompiler-Setup-{#AppVersion}
 SetupIconFile=app.ico
-UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayIcon={app}\app.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -34,12 +37,22 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\dist\AutoClipCompiler\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+; An upgrade replaces the whole app; stale modules must not linger.
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\site-packages"
+
+[UninstallDelete]
+; Python writes __pycache__ folders at runtime.
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\site-packages"
+
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppName}"; Filename: "{#Launcher}"; Parameters: "{#LaunchArgs}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; AppUserModelID: "{#AppId_}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{#Launcher}"; Parameters: "{#LaunchArgs}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; AppUserModelID: "{#AppId_}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{#Launcher}"; Parameters: "{#LaunchArgs}"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

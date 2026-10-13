@@ -44,7 +44,8 @@ def command(args, timeout=3600, cancel=None):
 
 def find_ffmpeg():
     """(ffmpeg, ffprobe): the copy bundled beside the app wins, then PATH. None when missing."""
-    roots = [Path(getattr(sys, '_MEIPASS', '')), Path(sys.executable).parent, Path(__file__).resolve().parent.parent]
+    # Installed layout: {app}\python\pythonw.exe and {app}\ffmpeg\ sit side by side.
+    roots = [Path(sys.executable).parent.parent, Path(sys.executable).parent, Path(__file__).resolve().parent.parent]
     for root in roots:
         bundled = root/'ffmpeg'
         if (bundled/'ffmpeg.exe').is_file() and (bundled/'ffprobe.exe').is_file():
