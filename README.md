@@ -53,7 +53,10 @@ Your clips are never modified or moved.
 **Requirements:** Windows 10 or 11 (64-bit), an internet connection, and a Google account for the
 Gemini API key. Nothing else: Python, FFmpeg and everything the app needs are included.
 
-1. Download **`AutoClipCompiler-Setup-<version>.exe`** and run it.
+1. Download **`AutoClipCompiler-Setup-<version>.exe`** from the
+   [latest release](https://github.com/KalebDieterle/auto-clip-compiler/releases/latest) and run it.
+   To update later, download the newer release and run it over the old install; your settings and
+   saved judgments are kept.
    - If Windows shows **"Windows protected your PC"** (SmartScreen), click **More info**, then
      **Run anyway**. This appears because the installer isn't code-signed.
    - No admin rights are needed. It installs for your Windows user only and adds a Start menu entry
