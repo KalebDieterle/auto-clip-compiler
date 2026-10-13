@@ -44,7 +44,11 @@ def selftest(window):
         time.sleep(.25)
         screen = window.evaluate_js("document.querySelector('.screen.on') ? document.querySelector('.screen.on').dataset.screen : null")
         if screen: break
-    log.info('SELFTEST %s screen=%s', 'OK' if screen else 'FAILED', screen)
+    import keyring
+    from ..media import find_ffmpeg
+    ffmpeg, backend = find_ffmpeg(), type(keyring.get_keyring()).__module__
+    ok = screen and ffmpeg and backend.startswith('keyring.backends.Windows')
+    log.info('SELFTEST %s screen=%s ffmpeg=%s keyring=%s', 'OK' if ok else 'FAILED', screen, ffmpeg and ffmpeg[0], backend)
     window.destroy()
 
 

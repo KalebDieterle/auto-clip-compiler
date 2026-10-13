@@ -1,103 +1,55 @@
 # Auto Clip Compiler
 
-Turns a folder of game clips into a compilation of memorable moments with friends: original audio,
-plain cuts, complete setup / payoff / reaction, and no footage played twice when the same moment was
-saved in more than one replay.
+Turns a folder of game clips into compilations of the funny moments. Google's Gemini watches and
+listens to each clip, scores what happens, and the app cuts the best moments from your original
+full-quality clips into one video or a set of parts. You review every moment before anything is
+rendered.
 
-**Status: work in progress, not a validated release.** Every component has automated tests, but
-no full-library run or quality evaluation has been done yet. See `HANDOFF.md`.
+Windows 10/11 (64-bit). Your clips are never modified or moved.
 
-**Rule #0: non-destructive.** Source clips and earlier compilations are never modified. Every render
-goes to a new, uniquely named folder.
+## Install
 
-## Fully local
+1. Download `AutoClipCompiler-Setup-<version>.exe` and run it.
+   Windows may say "Windows protected your PC" because the app isn't code-signed: click
+   **More info**, then **Run anyway**.
+2. No admin rights needed. It installs for your user only and adds a Start menu entry.
 
-Analysis runs on your machine: no paid APIs, no uploads, no hosted fallback. The internet is used only
-to install software and download models.
+## Get a Gemini API key
 
-- **Speech:** faster-whisper (small, CPU int8), timestamped.
-- **Laughter / loudness:** YAMNet + audio energy, as supporting evidence only (optional).
-- **Judge:** Ollama `qwen3-vl:8b` on loopback, temperature 0, 32K context, one request at a time.
-  It sees 1 frame per second of footage (4 per second around candidate payoffs) plus the transcript.
-  These are still images and text, not raw audio.
+1. Go to [Google AI Studio](https://aistudio.google.com/apikey) and create an API key.
+2. Paste it into the app on first launch. It's stored in Windows Credential Manager, not in a file.
 
-## Setup (Windows / PowerShell)
-
-```powershell
-winget install Gyan.FFmpeg
-winget install Ollama.Ollama
-ollama pull qwen3-vl:8b
-./setup.ps1
-.\.venv\Scripts\python.exe setup_models.py --yamnet   # whisper + optional YAMNet into models\
-```
+**Costs.** Judging costs about **$0.0045 per 30-second clip** (about $4.50 per 1,000 clips) at
+Gemini 3.8 Flash's paid price (until 2026-12-31, when Google doubles it). The free tier only allows
+about 20 clips a day, so turn on billing in AI Studio for a real library. Every clip is judged once:
+results are saved, so re-running, changing settings or rendering again never costs anything. The app
+shows an estimate before you start and stops at your budget cap.
 
 ## Use
 
-```powershell
-# Analyze 5 clips without rendering (measure timing before committing the GPU to a library)
-.\.venv\Scripts\python.exe autoclip.py --preflight 5 --source "D:\Clips" --output "D:\Out"
+1. **New**: pick your clips folder and an output folder, optionally a date range, and choose
+   *One video* (a set length of the best moments, newest clips first) or *Split into parts*
+   (everything good, in order, cut into parts of about N minutes).
+2. **Judging**: watch progress, moments found and money spent. *Stop* keeps everything judged so far.
+3. **Review**: every moment with its score and Gemini's reason. Click to watch it.
+   - <kbd>K</kbd> keep, <kbd>X</kbd> cut, <kbd>&larr;</kbd>/<kbd>&rarr;</kbd> move, <kbd>Space</kbd> play
+   - Drag the purple handles, or press <kbd>[</kbd> / <kbd>]</kbd> at the playhead, to trim.
+4. **Render**: the final videos land in a `Compilation <date>` folder inside your output folder,
+   with a DaVinci Resolve timeline (`Combined.fcpxml`, File > Import > Timeline) next to each.
 
-# Full run: analyze, then render chronologically
-.\.venv\Scripts\python.exe autoclip.py --source "D:\Clips" --output "D:\Out" --resolve
+Jobs run at below-normal priority so you can keep gaming. Closing the window stops the job; nothing
+already judged is lost.
 
-# Interrupted or partly failed? Completed stages are cached; resume the same run
-.\.venv\Scripts\python.exe autoclip.py --resume "D:\Out\run-..."
+## Privacy
 
-# Review candidates in the browser (keep / maybe / reject, trim), then render from saved decisions
-.\.venv\Scripts\python.exe autoclip.py --review "D:\Out\run-..."
-.\.venv\Scripts\python.exe autoclip.py --render-from "D:\Out\run-..." --min-score 5
-```
+Each clip is shrunk to a 480p copy, uploaded to Google's Gemini Files API, judged, and deleted from
+Google right after. Nothing else leaves your PC.
 
-Useful options: `-n/--top N`, `--min-score 1..10`, `--ranked` (best first; default is chronological),
-`--resolve` (FCPXML for DaVinci Resolve free: File > Import > Timeline), `--timestamp-overlay`,
-`--audio-track K` (zero-based; needed when a file has several audio tracks and none is marked
-default or mixed), `--allow-partial`, `--cpu`, `--llm-timeout` (default 300 s).
+## Uninstall
 
-## Guarantees and their limits
+Settings > Apps > Auto Clip Compiler > Uninstall. You'll be asked whether to also delete your
+settings, saved judgments and stored API key (keep them if you might reinstall).
 
-- **Failures are never "maybe".** A clip that fails transcription or judging marks the run
-  `incomplete`, and no normal compilation is published. Fix it and `--resume`, or pass
-  `--allow-partial` to get a `partial-` render that lists every omission.
-- **Review decisions stick.** A keep/reject/trim owns its interval. If a re-analysis describes the
-  same event differently, the new candidate yields to your decision.
-- **Duplicates.** Byte-identical files count as one recording. Overlapping replays count as shared
-  only where 1 fps frames visibly matched and audio agreed, and only inside the matched span.
-  Unverified overlap is kept, so it may repeat briefly rather than lose footage. Slices of one event
-  play in timeline order, and joins between recordings never repeat a frame.
-- **Not yet verified:** quality targets (90% recall on held-out favorites, no clipped essential
-  setup or payoff), multitrack audio as imported into Resolve, and the throughput of the vision model.
+---
 
-## Output layout
-
-```
-<output>\
-  .cache\                         # frames/audio by content hash (safe to delete)
-  run-YYYYMMDD-HHMMSS-xxxxxxxx\
-    run.sqlite                    # resumable ledger: sources, stages, candidates, reviews
-    summary.json  candidate_report.csv  manifest.csv  selections.json
-    model-responses\              # raw judge responses, for auditing
-    render-\<token>\              # Combined_highlights.mp4, manifest.csv, Combined.fcpxml, render.json
-    partial-\<token>\             # only with --allow-partial
-```
-
-## Evaluation
-
-`evaluate.py prepare` builds a 40-clip, 20/20 grouped split (duplicates stay in one half, known
-favorites go in both). After you label event intervals in `labels.csv`, `evaluate.py score` measures
-the **published** cut list: favorite recall, unwanted inclusions and repeated seconds, all in shared
-event coordinates.
-
-## Migration from the laughter/LLM-command version
-
-Retired: game sorting / Tesseract, laughter-gated selection, `--smart-rank` / `--every-clip` /
-`--all-games` behavior (accepted as no-op aliases), and hosted or command judges (`--llm-command`,
-`--llm-base-url`, ...). Every clip now gets full-context judging. Retired flags fail with an
-explanation.
-
-## Tests
-
-```powershell
-$env:PYTHONPATH = (Get-Location).Path
-.\.venv\Scripts\python.exe -m unittest discover -s tests
-```
-These need FFmpeg on PATH. The models are faked, so the tests use no GPU.
+Developers: see [docs/DEVELOPING.md](docs/DEVELOPING.md).
