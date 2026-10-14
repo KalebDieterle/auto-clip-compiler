@@ -110,6 +110,14 @@ class BatchTests(unittest.TestCase):
         state = self.submit(cancel=Instant())
         self.assertEqual((len(state['clips']), state['failed']), (4, []))
 
+    def test_an_unreadable_upload_is_dropped_not_fatal(self):
+        self.gc.files.broken.add('files/2')   # Google 500s on this one file every time.
+        state = self.submit()
+        self.assertEqual((len(state['clips']), len(state['failed'])), (3, 1))
+        self.assertEqual(state['failed'][0]['error'], 'upload ended UNREADABLE')
+        self.assertTrue(state['job'])
+        self.assertNotIn('files/2', {c['file'] for c in state['clips'].values()})
+
     def test_expired_or_failed_jobs_clean_up_and_report(self):
         state = self.submit()
         self.gc.batches.finish(state['job'], 'JOB_STATE_EXPIRED')

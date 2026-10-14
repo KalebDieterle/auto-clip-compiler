@@ -20,6 +20,7 @@ class Files:
     def __init__(self, owner, processing_polls):
         self.owner = owner; self.store = {}; self.polls = {}; self.processing_polls = processing_polls
         self.counter = itertools.count(1); self.deleted = []; self.fail_uploads = 0
+        self.broken = set()   # uploaded names whose get always fails, like Google's persistent 500
 
     def upload(self, file, config=None):
         if self.fail_uploads:
@@ -32,6 +33,7 @@ class Files:
 
     def get(self, name):
         if name not in self.store: raise KeyError(name)
+        if name in self.broken: raise RuntimeError('500 INTERNAL. Failed to convert server response to JSON')
         self.polls[name] = max(0, self.polls[name]-1)
         return NS(name=name, state=NS(name='PROCESSING' if self.polls[name] else 'ACTIVE'))
 

@@ -130,19 +130,19 @@ function handle(e) {
     case 'render_done': return renderDone(e);
     case 'render_cancelled': return renderStopped('Stopped. Earlier files were not touched.');
     case 'batch_upload': return batchUpload(e);
-    case 'batch_waiting': refreshState().then(() => { if (S.screen === 'batch') paintBatch(); }); return;
+    case 'batch_waiting': S.lastUpload = null; refreshState().then(() => { if (S.screen === 'batch') paintBatch(); }); return;
     case 'batch_collecting': return batchCollecting(e);
-    case 'batch_cancelled': refreshState().then(paintBatch); return;
+    case 'batch_cancelled': S.lastUpload = null; refreshState().then(paintBatch); return;
     case 'scan_cancelled': return;
     case 'error':
       toast(e.message, 'bad');
       if (e.job === 'render') renderStopped(e.message);
       if (e.job === 'scan') { $('#scanState').textContent = e.message; $('#scanBar').hidden = true; }
       if (e.job === 'judge') banner(e.message, 'bad');
-      if (e.job === 'batch' || e.job === 'collect') { $('#bHint').textContent = e.message; refreshState().then(paintBatch); }
+      if (e.job === 'batch' || e.job === 'collect') { S.lastUpload = null; $('#bHint').textContent = e.message; refreshState().then(paintBatch); }
       return;
     case 'idle':
-      refreshState();
+      S.lastUpload = null; refreshState();
       if (S.rescan) { S.rescan = false; scan(); }
   }
 }
@@ -845,7 +845,8 @@ function paintBatch() {
   $('#bResume').hidden = !((uploading && S.busy !== 'batch') || (cancelled && !b.job));
   if (uploading) {
     steps(0);
-    if (S.busy === 'batch') batchState('Uploading clips', '');
+    if (S.busy === 'batch' && S.lastUpload) paintUpload(S.lastUpload);
+    else if (S.busy === 'batch') batchState('Uploading clips', '');
     else { batchState('Upload was interrupted', 'idle'); $('#bHint').textContent = 'Uploads already made are reused when you resume.'; }
   } else if (waiting) {
     steps(1); batchState(BATCH_STATE[b.status] || 'Waiting on Google', '');
@@ -855,7 +856,13 @@ function paintBatch() {
   }
 }
 function batchUpload(e) {
-  if (S.screen !== 'batch') { if (S.state.run) S.state.run.status = 'batch_uploading'; go('batch'); }
+  // Jump to the Batch screen once when an upload starts; later progress must not pull the user off other screens.
+  const first = !S.lastUpload; S.lastUpload = e;
+  if (S.state.run) S.state.run.status = 'batch_uploading';
+  if (first && S.screen !== 'batch') return go('batch');
+  if (S.screen === 'batch') paintUpload(e);
+}
+function paintUpload(e) {
   $('#bResume').hidden = true; $('#bCancel').hidden = false; $('#bCheck').hidden = true; steps(0);
   $('#bBar').hidden = false; $('#bBar i').style.width = (e.total ? e.done / e.total * 100 : 0) + '%';
   batchState(`${e.stage === 2 ? 'Uploading close-ups' : 'Uploading clips'} · ${num(e.done)} of ${num(e.total)}`);

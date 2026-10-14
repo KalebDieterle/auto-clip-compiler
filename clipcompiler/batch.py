@@ -196,13 +196,17 @@ def _submit(state, todo, make, job_dir, gc, *, workers, max_usd, emit, cancel, p
         state.update(job=None, status='nothing'); save(job_dir, state); return state
     # Uploads expire after 48 h: wait for each to finish server-side processing; drop any that broke.
     for key, c in list(state['clips'].items()):
-        f = gc.files.get(name=c['file'])
-        for _ in range(150):
-            if f.state.name != 'PROCESSING': break
-            if cancel.wait(2): break
-            f = gc.files.get(name=c['file'])
-        if f.state.name != 'ACTIVE':
-            state['failed'].append({'clip': Path(c['path']).name, 'error': f'upload ended {f.state.name}'})
+        try:
+            ended = gc.files.get(name=c['file']).state.name
+            for _ in range(150):
+                if ended != 'PROCESSING': break
+                if cancel.wait(2): break
+                ended = gc.files.get(name=c['file']).state.name
+        except Exception as exc:   # One unreadable upload must not sink the batch (or every resume of it).
+            log.warning('%s: upload unreadable (%s); dropping it', Path(c['path']).name, exc)
+            ended = 'UNREADABLE'
+        if ended != 'ACTIVE':
+            state['failed'].append({'clip': Path(c['path']).name, 'error': f'upload ended {ended}'})
             try: gc.files.delete(name=c['file'])
             except Exception: pass
             del state['clips'][key]
