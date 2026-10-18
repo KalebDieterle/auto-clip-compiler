@@ -237,6 +237,16 @@ class PlanTests(unittest.TestCase):
         with patch('clipcompiler.media.CONTAIN_POOL_MIN', -1):
             self.assertTrue(media._inside(tracks, energy, 1, 0))
 
+    def test_faint_hiss_missing_from_the_mix_does_not_veto(self):
+        """Real OBS [mix, mic] clip, 2026-10-18: between words the mic is room hiss (-55 dBFS) that AAC
+        dropped from the mix, so that half read gain .26. It is .1% of the mic's sound: the mix still plays alone."""
+        rate = media.ANALYSIS_RATE; rng = random.Random(11); half = LONG//2*rate
+        game = [rng.gauss(0, 3000) for _ in range(LONG*rate)]
+        speech = [rng.gauss(0, 1300) if n < half else 0. for n in range(LONG*rate)]
+        hiss = [0. if n < half else rng.gauss(0, 57) for n in range(LONG*rate)]
+        tracks = [[g+s for g, s in zip(game, speech)], [s+h for s, h in zip(speech, hiss)]]
+        self.assertTrue(media._inside(tracks, [media._dot(t, t) for t in tracks], 1, 0))
+
     def test_sub_second_clip_plans_without_error(self):
         """Sol round 2: one analysis window left an empty half to divide by. Now too short to drop anything."""
         all_streams, plan = self.plan('short.mp4', [mixed(tone(200), tone(330)), tone(330)], seconds=.75)

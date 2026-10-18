@@ -128,6 +128,8 @@ CONTAIN_GAIN = (.99, 1.01)                   # A track found inside another at i
 CONTAIN_SHARE = .1                           # ...making up an audible part of it (>= 1% of its energy)...
 CONTAIN_POOL_GAIN, CONTAIN_POOL_SHARE = (.95, 1.05), .6  # ...and near that level in its loud and quiet moments
 CONTAIN_POOL_MIN = .5                        # (where too faint to measure that, mostly there) is dropped.
+CONTAIN_LOSS = .01                           # A half missing less than this share of j's sound can't veto: AAC drops
+# a mic's faint room hiss under game in the mix (real OBS clip: quiet half -55 dBFS, gain .26, .1% of the mic).
 CONTAIN_MIN_SECONDS = 15                     # Shorter, chance overlap of unrelated sounds hides ~5% of extra sound.
 CONTAIN_WINDOW = .25                         # Seconds per moment. With 1 s, AAC dropping some quiet mic under loud
 # game in the mix pulled real clips' quiet half to .93-.99; at .25 s it reads ~1.00, hence the wider band.
@@ -238,7 +240,8 @@ def _inside(tracks, energy, j, i):
         if share >= (CONTAIN_SHARE if whole else CONTAIN_POOL_SHARE):
             low, high = CONTAIN_GAIN if whole else CONTAIN_POOL_GAIN
             if not low <= x/eb <= high: return False
-        elif x/eb < CONTAIN_POOL_MIN: return False  # j sounds here but most of it is not in i.
+        elif x/eb < CONTAIN_POOL_MIN and eb-x > CONTAIN_LOSS*energy[j]:
+            return False  # j sounds here, and an audible part of it is not in i.
     return True
 
 
