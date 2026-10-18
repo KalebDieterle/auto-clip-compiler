@@ -3,6 +3,7 @@ and renders all carry that sound (nothing muted, nothing doubled, single-track c
 import json
 import math
 from pathlib import Path
+import random
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,12 @@ def noise(seed, seconds=3, color='pink'):
     return f'anoisesrc=color={color}:seed={seed}:amplitude=0.25:sample_rate=48000:duration={seconds}'
 
 
+def talk(seed, seconds=8, volume=1.):
+    """Speech-like: bursts of brown noise, near silent between them, so a mic's level changes over time."""
+    return (noise(seed, seconds, 'brown') +
+            f",volume='{volume}*if(lt(mod(t,1.3),0.6),1,0.05)':eval=frame")
+
+
 def mixed(*sources):
     """One lavfi graph that sums sources at full level, the way a recorder writes its mix track."""
     labels = ''.join(f'{s}[s{i}];' for i, s in enumerate(sources))
@@ -31,6 +38,7 @@ def mixed(*sources):
 
 
 SILENCE = 'anullsrc=channel_layout=mono:sample_rate=48000,atrim=duration=3'
+LONG = media.CONTAIN_MIN_SECONDS + 1  # Seconds: long enough for a contained track to be dropped.
 
 
 def recording(path, tracks, seconds=3, names=None, defaults=None, layouts=None, codec=('aac', '-b:a', '128k')):
@@ -155,6 +163,95 @@ class PlanTests(unittest.TestCase):
         all_streams, plan = self.plan('partial-premix.mp4', [mixed(g, c + ',volume=0.5'), g, mixed(c, m + ',volume=0.3')])
         self.assertEqual(plan, all_streams)
 
+    # [mix, mic]: OBS with track 1 = everything and track 2 = mic only. 1.1.2 played both (mic twice).
+    # Containment needs CONTAIN_MIN_SECONDS of audio, so these clips are LONG.
+    def test_mix_and_mic_plays_the_mix_alone(self):
+        game, mic = noise(1, LONG), talk(2, LONG)
+        all_streams, plan = self.plan('mix-mic.mp4', [mixed(game, mic), mic], seconds=LONG, layouts=['stereo', 'mono'])
+        self.assertEqual(plan, all_streams[:1])
+
+    def test_mic_before_mix_plays_the_mix_alone(self):
+        game, mic = noise(1, LONG), talk(2, LONG)
+        all_streams, plan = self.plan('mic-mix.mp4', [mic, mixed(game, mic)], seconds=LONG)
+        self.assertEqual(plan, all_streams[1:])
+
+    def test_track_with_sound_the_other_lacks_is_kept(self):
+        """The game track sits inside [game + mic], never the reverse: the mic track is not dropped."""
+        game = noise(1, LONG)
+        all_streams, plan = self.plan('mic-over-game.mp4', [mixed(game, talk(2, LONG, volume=.15)), game], seconds=LONG)
+        self.assertEqual(plan, all_streams[:1])
+
+    def test_short_clip_keeps_every_track(self):
+        """The same [game, game + mic] at 3 s: too short to rule out chance overlap, so 1.1.2's mix of both."""
+        game = noise(1)
+        all_streams, plan = self.plan('mic-over-game-short.mp4', [mixed(game, talk(2, 3, volume=.15)), game])
+        self.assertEqual(plan, all_streams)
+
+    def test_two_mixes_sharing_a_source_at_other_levels_both_play(self):
+        """[game + 1.25 chat, chat + bursty mic]: on average track 2 sits in track 1 at about its own level,
+        but not in the seconds with and without the mic, so the mic track stays."""
+        chat = noise(3, LONG, color='white')
+        all_streams, plan = self.plan('shared-chat.mp4', [mixed(noise(1, LONG), chat + ',volume=1.25'),
+                                                           mixed(chat, talk(2, LONG, volume=.9))], seconds=LONG)
+        self.assertEqual(plan, all_streams)
+
+    def test_contained_check_needs_matching_level_in_loud_and_quiet_seconds(self):
+        rate = media.ANALYSIS_RATE; rng = random.Random(7)
+        game = [rng.gauss(0, 1000) for _ in range(LONG*rate)]
+        chat = [rng.gauss(0, 1000) for _ in range(LONG*rate)]
+        mic = [rng.gauss(0, 1400) if (n//rate) % 2 else 0. for n in range(LONG*rate)]
+        def check(j, i):
+            tracks = [j, i]; return media._inside(tracks, [media._dot(t, t) for t in tracks], 0, 1)
+        self.assertTrue(check(mic, [g+m for g, m in zip(game, mic)]))
+        self.assertFalse(check([g+m for g, m in zip(game, mic)], mic))
+        self.assertFalse(check([c+m for c, m in zip(chat, mic)], [g+1.25*c for g, c in zip(game, chat)]))
+        self.assertFalse(check([x/100 for x in mic], game))  # A whisper of a separate mic is not "in" the game.
+
+    # Review findings (Sol, 2026-10-18), each a track with sound of its own taken as contained.
+    def test_quiet_unique_mic_next_to_a_shared_game_is_kept(self):
+        """[game + chat, game + mic 12 dB down]: both tracks hold the game at one level; only track 2 has the mic."""
+        game = noise(1, LONG)
+        all_streams, plan = self.plan('shared-game.mp4', [mixed(game, noise(3, LONG, color='white')),
+                                                           mixed(game, talk(2, LONG, volume=.25))], seconds=LONG)
+        self.assertEqual(plan, all_streams)
+
+    def test_short_clip_with_a_quiet_unique_mic_keeps_both(self):
+        """Sol round 3: at 3 s, chance overlap of game and chat hid a mic at 4.6% of the game."""
+        game, chat = noise(1, 3, 'brown') + ',volume=0.4', noise(101, 3, 'pink') + ',volume=0.4'
+        all_streams, plan = self.plan('shared-game-short.mp4', [mixed(game, chat), mixed(game, talk(3, 3, volume=.12))],
+                                      codec=('aac', '-b:a', '160k'))
+        self.assertEqual(plan, all_streams)
+
+    def test_seconds_where_most_of_a_track_is_missing_veto_containment(self):
+        """Track 1 = 1.04 game for 8 s + unrelated sound; track 2 = game, then 8 s of speech sized so the
+        whole-sample gain is exactly 1. The speech seconds correlate too little to check the level, but that
+        is the evidence: track 2 stays. Without the veto every other check passes."""
+        rate = media.ANALYSIS_RATE; rng = random.Random(3); half = LONG//2*rate
+        game = [rng.gauss(0, 1000) if n < half else 0. for n in range(LONG*rate)]
+        other = [rng.gauss(0, 1000) for _ in range(LONG*rate)]
+        speech = [rng.gauss(0, 1000) if n >= half else 0. for n in range(LONG*rate)]
+        scale = math.sqrt(.04*media._dot(game, game)/media._dot(speech, speech))
+        tracks = [[1.04*g+o for g, o in zip(game, other)], [g+scale*s for g, s in zip(game, speech)]]
+        energy = [media._dot(t, t) for t in tracks]
+        self.assertFalse(media._inside(tracks, energy, 1, 0))
+        with patch('clipcompiler.media.CONTAIN_POOL_MIN', -1):
+            self.assertTrue(media._inside(tracks, energy, 1, 0))
+
+    def test_sub_second_clip_plans_without_error(self):
+        """Sol round 2: one analysis window left an empty half to divide by. Now too short to drop anything."""
+        all_streams, plan = self.plan('short.mp4', [mixed(tone(200), tone(330)), tone(330)], seconds=.75)
+        self.assertEqual(plan, all_streams)
+
+    def test_premix_keeps_a_track_too_quiet_to_compare(self):
+        """[game + chat, game, chat, faint mic]: the faint mic was never compared, so it plays with the premix."""
+        rate = media.ANALYSIS_RATE; rng = random.Random(5)
+        game, chat = ([rng.gauss(0, 1000) for _ in range(4*rate)] for _ in range(2))
+        faint = [rng.gauss(0, 20) for _ in range(4*rate)]
+        tracks = [[g+c for g, c in zip(game, chat)], game, chat, faint]
+        audio = [{'index': n+1} for n in range(4)]
+        with patch('clipcompiler.media.track_samples', return_value=tracks):
+            self.assertEqual(plan_by_sound('clip.mp4', audio), [1, 4])
+
     def test_inverted_copy_is_dropped_instead_of_cancelling(self):
         game = noise(1)
         all_streams, plan = self.plan('inverted.mp4', [game, game + ',aeval=-val(0)'])
@@ -197,6 +294,8 @@ class PipelineTests(unittest.TestCase):
         cls.pair = recording(cls.root/'game-mic.mp4', [tone(200), tone(330)], defaults=[True, False])
         cls.premix = recording(cls.root/'premix.mp4', [mixed(tone(200), tone(330)), tone(200), tone(330)])
         cls.single = recording(cls.root/'single.mp4', [mixed(tone(200), tone(330))])
+        cls.mix_mic = recording(cls.root/'mix-mic.mp4', [mixed(tone(200, LONG), tone(330, LONG)), tone(330, LONG)],
+                                seconds=LONG, layouts=['stereo', 'mono'])
 
     @classmethod
     def tearDownClass(cls): cls.temp.cleanup()
@@ -216,6 +315,12 @@ class PipelineTests(unittest.TestCase):
     def test_premix_is_not_doubled(self):
         """The premix render matches a single-track render of the same mix within 1 dB."""
         _, mix = self.render(self.item(self.premix)); _, ref = self.render(self.item(self.single))
+        for f in (200, 330):
+            self.assertAlmostEqual(20*math.log10(level(mix, f)/level(ref, f)), 0, delta=1)
+
+    def test_mic_next_to_its_mix_is_not_doubled(self):
+        """[mix, mono mic] renders like the mix alone; 1.1.2 put the mic (330 Hz) about 6 dB hot."""
+        _, mix = self.render(self.item(self.mix_mic)); _, ref = self.render(self.item(self.single))
         for f in (200, 330):
             self.assertAlmostEqual(20*math.log10(level(mix, f)/level(ref, f)), 0, delta=1)
 
@@ -274,7 +379,7 @@ class PipelineTests(unittest.TestCase):
                                _view=lambda m: {'window_start': 0, 'window_end': 2.5})
         with patch('clipcompiler.ui.api.paths.previews_dir', return_value=self.root/'previews'):
             path = Api._media(stub, 'pair-preview', 'mp4')
-        self.assertTrue(path.endswith('a1.mp4'))
+        self.assertTrue(path.endswith('a2.mp4'))
         pcm = samples(path)
         self.assertGreater(level(pcm, 200), 300); self.assertGreater(level(pcm, 330), 300)
 

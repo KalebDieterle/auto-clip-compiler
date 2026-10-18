@@ -124,6 +124,19 @@ DUPLICATE_CORR = .999                        # Only a near-exact copy of an earl
 INVERTED_CORR = -.9                          # ...or an inverted one, which would cancel it in the mix.
 PREMIX_FIT, PREMIX_GAIN = .97, .2            # A track the others explain this well, each audibly, may be their mix,
 PREMIX_RESIDUAL = .05                        # if what it lacks is small next to the quietest track it would replace.
+CONTAIN_GAIN = (.99, 1.01)                   # A track found inside another at its own level ([mix, mic])...
+CONTAIN_SHARE = .1                           # ...making up an audible part of it (>= 1% of its energy)...
+CONTAIN_POOL_GAIN, CONTAIN_POOL_SHARE = (.95, 1.05), .6  # ...and near that level in its loud and quiet moments
+CONTAIN_POOL_MIN = .5                        # (where too faint to measure that, mostly there) is dropped.
+CONTAIN_MIN_SECONDS = 15                     # Shorter, chance overlap of unrelated sounds hides ~5% of extra sound.
+CONTAIN_WINDOW = .25                         # Seconds per moment. With 1 s, AAC dropping some quiet mic under loud
+# game in the mix pulled real clips' quiet half to .93-.99; at .25 s it reads ~1.00, hence the wider band.
+# Real [mix, mic] clips measured .999-1.001 overall; one that clips, or whose quiet mic AAC thins in the mix
+# (synthetic noise 'mics' read .98-.99), falls back to mixing both, as 1.1.2 did. Limits: two
+# tracks sharing a source, each with its own extra sound, look contained when the extra is under ~1% of
+# the track (~20 dB below the shared sound), or when the shared source sits louder in the kept track by
+# about what the extra adds (e.g. [1.1 game + chat, game + mic 10 dB down]). OBS can't record the second:
+# a source's volume applies to every track.
 _plans, _plans_lock = {}, threading.Lock()
 
 
@@ -166,8 +179,11 @@ def audio_plan(path, ffmpeg='ffmpeg', ffprobe=None, data=None, cancel=None):
 
 
 def track_samples(path, audio, ffmpeg, cancel=None):
-    """Each track as mono 16-bit samples at ANALYSIS_RATE, aligned, from one ffmpeg pass."""
-    labels = ''.join(f'[0:{s["index"]}]aresample={ANALYSIS_RATE},aformat=sample_fmts=s16:channel_layouts=mono[t{n}];'
+    """Each track as mono 16-bit samples at ANALYSIS_RATE, aligned, from one ffmpeg pass. Every track goes
+    through stereo first, as playback and the mix do, so a mono mic compares at the level it plays at
+    (ffmpeg spreads mono to stereo at -3 dB a side; straight to mono it would read 3 dB louder)."""
+    labels = ''.join(f'[0:{s["index"]}]aresample={ANALYSIS_RATE},aformat=channel_layouts=stereo,'
+                     f'aformat=sample_fmts=s16:channel_layouts=mono[t{n}];'
                      for n, s in enumerate(audio))
     graph = labels + ''.join(f'[t{n}]' for n in range(len(audio))) + f'amerge=inputs={len(audio)}[out]'
     raw = command([ffmpeg, '-v', 'error', '-t', ANALYSIS_SECONDS, '-i', path, '-filter_complex', graph,
@@ -199,10 +215,38 @@ def _solve(matrix, vector):
     return [rows[i][n]/rows[i][i] for i in range(n)]
 
 
+def _inside(tracks, energy, j, i):
+    """Whether all of track j's sound is in track i at j's own level (i = j + other sound), so playing i
+    alone loses nothing of j. A recorder's [mix, mic] layout is the case: the mix holds the mic and the game.
+    Checked over the whole sample, then again over the half of the seconds where j is loudest and
+    the half where it is quietest, so two tracks that share a source at different levels and only match
+    on average are not taken for a track and its mix."""
+    if energy[i] < energy[j]: return False  # j plus other sound can't be quieter than j.
+    if len(tracks[i]) < CONTAIN_MIN_SECONDS*ANALYSIS_RATE: return False  # Too little to tell.
+    a, b, step = tracks[i], tracks[j], int(ANALYSIS_RATE*CONTAIN_WINDOW)
+    seconds = [(_dot(a[s:s+step], a[s:s+step]), _dot(b[s:s+step], b[s:s+step]), _dot(a[s:s+step], b[s:s+step]),
+                len(a[s:s+step])) for s in range(0, len(a), step)]
+    # By j's own loudness: sorting on i's would pick seconds by the j-i cross term and bias both halves.
+    seconds.sort(key=lambda t: t[1]/t[3])
+    half = len(seconds)//2
+    for pool in (seconds, seconds[:half], seconds[half:]):
+        ea, eb, x, n = (math.fsum(t[k] for t in pool) for k in range(4))
+        whole = pool is seconds
+        if not whole and (not n or eb < SILENT_RMS**2*n): continue  # j is silent here: nothing of it to lose.
+        share = x/math.sqrt(ea*eb) if ea and eb else 0.
+        if whole and share < CONTAIN_SHARE: return False
+        if share >= (CONTAIN_SHARE if whole else CONTAIN_POOL_SHARE):
+            low, high = CONTAIN_GAIN if whole else CONTAIN_POOL_GAIN
+            if not low <= x/eb <= high: return False
+        elif x/eb < CONTAIN_POOL_MIN: return False  # j sounds here but most of it is not in i.
+    return True
+
+
 def plan_by_sound(path, audio, ffmpeg='ffmpeg', cancel=None):
     """Decide from the waveforms: drop tracks that copy (or invert) an earlier one; if one remaining track
     is a least-squares mix of all the other sounding tracks, each audibly in it and nothing of theirs
-    missing, play it alone; else mix all."""
+    missing, play it alone; else drop tracks whose sound another track already holds at the same level
+    (a mix next to the mic it contains) and mix the rest."""
     tracks = [_centered(t) for t in track_samples(path, audio, ffmpeg, cancel)]
     energy = [_dot(t, t) for t in tracks]
     sounding = [e/len(t) >= SILENT_RMS**2 for t, e in zip(tracks, energy)]
@@ -223,7 +267,10 @@ def plan_by_sound(path, audio, ffmpeg='ffmpeg', cancel=None):
             residual = energy[i] - sum(g*c for g, c in zip(gains, cross))
             quietest = min(g*g*energy[j] for g, j in zip(gains, others))
             if residual <= (1-PREMIX_FIT)*energy[i] and residual <= PREMIX_RESIDUAL*quietest:
-                return [audio[i]['index']]
+                # Tracks too quiet to compare were never tested against the premix: they stay.
+                return [audio[k]['index'] for k in kept if k == i or not sounding[k]]
+    for j in list(active):  # In order, against what is still kept, so of two equal tracks one stays.
+        if any(i != j and i in kept and _inside(tracks, energy, j, i) for i in active): kept.remove(j)
     return [audio[i]['index'] for i in kept]
 
 

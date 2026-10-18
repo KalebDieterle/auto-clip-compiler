@@ -649,9 +649,9 @@ class Api:
         m = next((m for m in self._run['moments'] if m['id'] == moment_id), None)
         if not m: raise ValueError('Unknown moment')
         folder = paths.previews_dir(); folder.mkdir(parents=True, exist_ok=True)
-        # 'a1' (hex, so the media server serves it): previews made before 1.1.2 carried only the first
-        # audio track; those get remade.
-        name = f"{moment_id[:32]}{'a1' if kind == 'mp4' else ''}.{kind}"; target = folder/name
+        # 'a2' (hex, so the media server serves it): previews made before 1.1.2 carried only the first
+        # audio track, and 1.1.2's played a [mix, mic] clip's mic twice; those get remade.
+        name = f"{moment_id[:32]}{'a2' if kind == 'mp4' else ''}.{kind}"; target = folder/name
         if not target.exists():
             ffmpeg = self._ffmpeg[0]; v = self._view(m); tmp = folder/f'.{name}.tmp.{kind}'
             with (self._media_gate if kind == 'jpg' else self._preview_gate):
