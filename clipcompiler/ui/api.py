@@ -15,7 +15,7 @@ import time
 import webbrowser
 
 from .. import APP_NAME, __version__, batch, gemini, job, paths, settings as config, skill
-from ..media import Cancelled, command, find_ffmpeg
+from ..media import Cancelled, audio_args, audio_plan, command, find_ffmpeg
 from ..reel import discover, split_parts
 from ..store import HashIndex, atomic_json, awake
 import json
@@ -649,7 +649,9 @@ class Api:
         m = next((m for m in self._run['moments'] if m['id'] == moment_id), None)
         if not m: raise ValueError('Unknown moment')
         folder = paths.previews_dir(); folder.mkdir(parents=True, exist_ok=True)
-        name = f"{moment_id[:32]}.{kind}"; target = folder/name
+        # 'a1' (hex, so the media server serves it): previews made before 1.1.2 carried only the first
+        # audio track; those get remade.
+        name = f"{moment_id[:32]}{'a1' if kind == 'mp4' else ''}.{kind}"; target = folder/name
         if not target.exists():
             ffmpeg = self._ffmpeg[0]; v = self._view(m); tmp = folder/f'.{name}.tmp.{kind}'
             with (self._media_gate if kind == 'jpg' else self._preview_gate):
@@ -658,8 +660,9 @@ class Api:
                     command([ffmpeg, '-v', 'error', '-y', '-ss', at, '-i', m['source_path'], '-frames:v', '1',
                              '-vf', 'scale=480:-2', '-q:v', '4', tmp], 60)
                 else:
+                    _, plan = audio_plan(m['source_path'], ffmpeg, self._ffmpeg[1])
                     command([ffmpeg, '-v', 'error', '-y', '-ss', v['window_start'], '-i', m['source_path'],
-                             '-t', v['window_end']-v['window_start'], '-map', '0:v:0', '-map', '0:a:0?',
+                             '-t', v['window_end']-v['window_start'], '-map', '0:v:0', *audio_args(plan),
                              '-vf', 'scale=-2:540,fps=30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
                              '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', tmp], 300)
             os.replace(tmp, target)

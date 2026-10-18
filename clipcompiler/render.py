@@ -2,6 +2,7 @@
 import csv
 import datetime
 import json
+import logging
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,9 @@ import threading
 import uuid
 import xml.etree.ElementTree as ET
 
-from .media import command, probe, media_preflight
+from .media import Cancelled, audio_plan, command, is_silent, media_preflight, mix_filter, probe, source_channels
+
+log=logging.getLogger(__name__)
 from .store import atomic_json, file_hash
 
 
@@ -67,7 +70,7 @@ def manifest(path, items):
                 transcript=c.get('transcript',''),in_timestamp=timestamp(c['start']),out_timestamp=timestamp(c['end']),
                 clip_duration=c['duration'],source_path=c['source_path'],copied_path='',candidate_id=c['id'],
                 recommendation=c.get('recommendation','keep'),reason=c.get('reason',''),
-                source_hash=c.get('source_hash',''),audio_stream=c.get('audio_stream'),
+                source_hash=c.get('source_hash',''),audio_stream='+'.join(map(str,c.get('audio_streams') or [])),
                 in_seconds=repr(c['start']),out_seconds=repr(c['end'])))
 
 
@@ -98,9 +101,9 @@ def fcpxml(path, items, fps, height):
                 ET.SubElement(resources,'format',id=formats[shape],frameDuration=shape[2],width=str(shape[0]),height=str(shape[1]))
             fid=formats[shape]
         attrs=dict(id=aid,name=Path(key).stem,src=Path(key).resolve().as_uri(),start='0s',duration=t(c['duration']),
-                   hasVideo='1',hasAudio='1' if c.get('audio_stream') is not None else '0',format=fid)
-        if c.get('audio_stream') is not None:
-            # The asset is the whole file (every track); the clip's channel source picks one.
+                   hasVideo='1',hasAudio='1' if c.get('audio_streams') else '0',format=fid)
+        if c.get('audio_streams'):
+            # The asset is the whole file (every track); the clip's channel source picks the plan's tracks.
             attrs.update(audioSources=str(c.get('audio_sources') or 1),
                          audioChannels=str(c.get('audio_total_channels') or c.get('audio_channels') or 2))
         ET.SubElement(resources,'asset',attrs)
@@ -146,6 +149,29 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
         if c.get('source_hash') and hasher(Path(c['source_path'])) != c['source_hash']:
             raise ValueError(f'Source changed since analysis: {c["source_path"]}')
         checked.add(c['source_path'])
+    # The audio plan is decided now, from the file, so compilations saved by older versions (which
+    # muted or dropped tracks of multi-track clips) render with every track without re-judging.
+    sources=sorted(checked)
+    def plan_for(source):
+        if cancel is not None and cancel.is_set(): raise Cancelled()
+        return audio_plan(source,settings['ffmpeg'],settings['ffprobe'],cancel=cancel)
+    pool=ThreadPoolExecutor(max_workers=settings.get('workers',2))
+    try:
+        plans=dict(zip(sources,pool.map(plan_for,sources)))
+    finally:
+        pool.shutdown(cancel_futures=True)
+    for c in items:
+        data,plan=plans[c['source_path']]
+        # A caller may pin tracks with audio_streams; otherwise every audio field follows the fresh plan,
+        # never values saved alongside an older plan.
+        if 'audio_streams' not in c:
+            c['audio_streams']=plan
+            for key in ('audio_src_channels','audio_sources','audio_total_channels'): c.pop(key,None)
+        c['audio_stream']=c['audio_streams'][0] if len(c['audio_streams'])==1 else None
+        c.setdefault('audio_sources',len(data['audio_streams']))
+        c.setdefault('audio_total_channels',sum(s.get('channels',2) for s in data['audio_streams']))
+        if len(data['audio_streams'])>1: c.setdefault('audio_src_channels',source_channels(data,c['audio_streams']))
+    silent=[]
     token=datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8]
     final=root/('partial-' if partial else 'render-')/token
     final.parent.mkdir(parents=True,exist_ok=True)
@@ -155,10 +181,29 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
     width=round(height*16/9/2)*2
     def encode(pair):
         i,c=pair; dest=work/f'{i:06}.mp4'; duration=c['end']-c['start']
+        plan=c['audio_streams']; run(c,plan,dest,duration)
+        if plan and is_silent(dest,settings['ffmpeg']):
+            # A mix should never cancel out, but if it does, a single sounding track beats silence.
+            for track in plan if len(plan)>1 else []:
+                run(c,[track],dest,duration)
+                if not is_silent(dest,settings['ffmpeg']):
+                    log.warning('%s: mix of %s came out silent; used track %s alone',c['source_path'],plan,track); break
+            else:
+                log.warning('%s: segment %d came out silent although the source has audio %s',c['source_path'],i,plan)
+                with progress_lock: silent.append(c['id'])
+        if on_progress:
+            with progress_lock:
+                done[0]+=1; on_progress(done[0],len(items))
+        return dest
+    def run(c,plan,dest,duration):
+        # Optional per-segment loudness normalization, so a long reel holds one volume.
+        post='loudnorm=I=-16:TP=-1.5:LRA=11,apad' if settings.get('loudnorm') else 'apad'
         args=[settings['ffmpeg'],'-v','error','-y','-ss',c['start'],'-i',c['source_path']]
-        if c.get('audio_stream') is None:
+        if not plan:
             args += ['-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000']
-        args += ['-t',duration,'-map','0:v:0','-map',f'0:{c["audio_stream"]}' if c.get('audio_stream') is not None else '1:a:0']
+        args += ['-t',duration,'-map','0:v:0']
+        if len(plan)>1: args += ['-filter_complex',mix_filter(plan,post),'-map','[aout]']
+        else: args += ['-map',f'0:{plan[0]}' if plan else '1:a:0','-af',post]
         vf=f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}'
         if settings.get('timestamp_overlay'):
             label=datetime.datetime.fromtimestamp(c.get('recorded_at',Path(c['source_path']).stat().st_mtime)).strftime('%Y-%m-%d %I.%M %p')
@@ -166,14 +211,8 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
             vf+=f",drawtext=fontfile='{font}':text='{label}':x=20:y=h-th-20:fontsize={max(16,height//40)}:fontcolor=white:box=1:boxcolor=black@0.6"
         args += ['-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p',
                  '-c:a','aac','-ar','48000','-ac','2',
-                 # Optional per-segment loudness normalization, so a long reel holds one volume.
-                 '-af','loudnorm=I=-16:TP=-1.5:LRA=11,apad' if settings.get('loudnorm') else 'apad',
                  '-movflags','+faststart',dest]
         command(args,cancel=cancel); verify_output(dest,duration,settings['ffprobe'],fps)
-        if on_progress:
-            with progress_lock:
-                done[0]+=1; on_progress(done[0],len(items))
-        return dest
     progress_lock=threading.Lock(); done=[0]
     try:
         if settings.get('render',True):
@@ -193,7 +232,7 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
         if settings.get('resolve'): fcpxml(staging/'Combined.fcpxml',items,fps,height)
         atomic_json(staging/'selections.json',items)
         atomic_json(staging/'render.json',{'status':'partial' if partial else 'complete','partial':partial,
-                                         'omissions':list(omissions),'selected':len(items)})
+                                         'omissions':list(omissions),'selected':len(items),'silent_segments':silent})
         shutil.rmtree(work)
         os.rename(staging,final)  # Same-volume atomic directory publication; unique target.
         return final

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 import time
 
-from .media import Cancelled, command
+from .media import Cancelled, audio_args, audio_plan, command
 from .store import identity
 
 log = logging.getLogger(__name__)
@@ -67,9 +67,11 @@ def client(api_key):
 
 
 def proxy(path, directory, ffmpeg='ffmpeg', cancel=None):
-    """Small 480p/10fps copy for upload; same timeline, so moment times map 1:1 to the original."""
+    """Small 480p/10fps copy for upload; same timeline, so moment times map 1:1 to the original.
+    Its sound is the clip's audio plan, so the judge hears every track (game, mic, chat), not just one."""
     target = Path(directory)/(identity([str(path)])[:16]+'.mp4')
-    tail = ['-i', path, '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'scale=-2:480,fps=10', '-c:v', 'libx264',
+    _, plan = audio_plan(path, ffmpeg)
+    tail = ['-i', path, '-map', '0:v:0', *audio_args(plan), '-vf', 'scale=-2:480,fps=10', '-c:v', 'libx264',
             '-preset', 'ultrafast', '-crf', '30', '-c:a', 'aac', '-b:a', '96k', '-ac', '2', target]
     try:
         # OBS records AV1; hardware decode is ~3x faster than software.
@@ -145,7 +147,7 @@ def ask_one(gc, model, path, uploaded, stop, ask, errors):
             if stop.wait(wait): raise Cancelled()
     result = json.loads(response.text)
     usage = response.usage_metadata
-    result['_meta'] = {'model': model, 'prompt': ask['version'], 'seconds': round(time.monotonic()-started, 1),
+    result['_meta'] = {'model': model, 'resolved_model': getattr(response, 'model_version', None), 'prompt': ask['version'], 'seconds': round(time.monotonic()-started, 1),
                        'input_tokens': usage.prompt_token_count, 'output_tokens': usage.candidates_token_count,
                        'thinking_tokens': usage.thoughts_token_count}
     return result

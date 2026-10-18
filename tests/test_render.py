@@ -116,7 +116,8 @@ class MultitrackTests(unittest.TestCase):
             root = Path(root); src = clip(root/'two tracks.mp4', seconds=3, tracks=2)
             meta = probe(src, audio_track=1)
             item = dict(id='c', source='s', source_path=str(src), source_hash=None, start=0, end=2,
-                        duration=meta['duration'], audio_stream=meta['audio_stream'], audio_channels=channels(meta),
+                        duration=meta['duration'], audio_stream=meta['audio_stream'], audio_streams=[meta['audio_stream']],
+                        audio_channels=channels(meta),
                         audio_src_channels=source_channels(meta), audio_sources=len(meta['audio_streams']),
                         audio_total_channels=sum(s['channels'] for s in meta['audio_streams']),
                         source_width=meta['width'], source_height=meta['height'], source_fps=meta['fps'])
