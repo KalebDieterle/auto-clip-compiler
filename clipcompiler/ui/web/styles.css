@@ -199,7 +199,7 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.2); }
 .recent li span, .drafts li span { color: var(--muted); font-size: 12.5px; }
 .drafts { max-width: 720px; }
 .drafts li > div { flex: 1; }
-.drafts .discard { display: inline-flex; align-items: center; gap: 6px; }
+.drafts .discard, .drafts .folder { display: inline-flex; align-items: center; gap: 6px; }
 .drafts .discard:hover { color: var(--bad, #f87171); }
 .pill { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; background: var(--surface-3); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .pill.review { background: var(--accent-soft); color: var(--accent-2); }

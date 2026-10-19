@@ -152,7 +152,7 @@ class Api:
         """Open a file or folder the app produced (output folder, run folder, logs)."""
         target = Path(path).resolve()
         roots = [Path(self._settings.output).resolve()] if self._settings.output else []
-        roots.append(paths.logs_dir().resolve())
+        roots += [paths.logs_dir().resolve(), *(Path(f).resolve() for f in self._remembered())]
         if not any(target == r or r in target.parents for r in roots) or not target.exists():
             return {'error': 'That location is not one the app created.'}
         os.startfile(target); return {'ok': True}
@@ -319,7 +319,7 @@ class Api:
         unready = any(not self._ready(r, mode) for r in rows)
         if unready and not key: return {'error': 'Add your Gemini API key in Settings first.'}
         run_dir = Path(s.output)/datetime.datetime.now().strftime('Compilation %Y-%m-%d %H-%M-%S')
-        run_dir.mkdir(parents=True)
+        run_dir.mkdir(parents=True); self._remember(run_dir)
         batch_mode = s.judge_mode == 'batch' and unready
         run = {'created': datetime.datetime.now().isoformat(timespec='seconds'),
                'status': 'batch_uploading' if batch_mode else 'judging', 'judge_mode': 'batch' if batch_mode else 'live',
@@ -567,19 +567,60 @@ class Api:
             'folder': str(self._run_dir), 'moments': len(self._run['moments']),
             'content_mode': self._run.get('content_mode', 'funny')}
 
+    @staticmethod
+    def _run_row(f):
+        """One compilation's list entry from its run.json, or None if it is missing or unreadable."""
+        try:
+            data = json.loads(f.read_text(encoding='utf-8'))
+            return {'folder': str(f.parent), 'created': data['created'], 'status': data['status'],
+                    'moments': len(data['moments']), 'mode': data['mode'], 'files': data.get('files', []),
+                    'judge_mode': data.get('judge_mode', 'live'), 'batch': data.get('batch'),
+                    'content_mode': data.get('content_mode', 'funny'), 'stage': data.get('stage', 1),
+                    'usd': (data.get('usage') or {}).get('usd', data.get('usd_paid'))}
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def _recent_runs(self, limit=6):
         if not self._settings.output or not Path(self._settings.output).is_dir(): return []
-        runs = []
-        for f in sorted(Path(self._settings.output).glob('Compilation */run.json'), reverse=True)[:limit]:
-            try:
-                data = json.loads(f.read_text(encoding='utf-8'))
-                runs.append({'folder': str(f.parent), 'created': data['created'], 'status': data['status'],
-                             'moments': len(data['moments']), 'mode': data['mode'], 'files': data.get('files', []),
-                             'judge_mode': data.get('judge_mode', 'live'), 'batch': data.get('batch'),
-                             'content_mode': data.get('content_mode', 'funny'), 'stage': data.get('stage', 1)})
-            except (OSError, ValueError, KeyError):
-                continue
-        return runs
+        rows = (self._run_row(f) for f in sorted(Path(self._settings.output).glob('Compilation */run.json'), reverse=True))
+        return [r for r in rows if r][:limit]
+
+    @staticmethod
+    def _remembered():
+        try:
+            data = json.loads(paths.runs_path().read_text(encoding='utf-8'))
+            return [str(f) for f in data] if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _remember(self, *folders):
+        with self._lock:
+            known = self._remembered(); seen = {os.path.normcase(f) for f in known}
+            new = [str(Path(f).resolve()) for f in folders]
+            new = [f for f in dict.fromkeys(new) if os.path.normcase(f) not in seen]
+            if new:
+                paths.runs_path().parent.mkdir(parents=True, exist_ok=True)
+                atomic_json(paths.runs_path(), known+new)
+
+    @safe
+    def history(self):
+        """Every compilation, newest first: the remembered ones plus any found in, next to or one level
+        under the output folder (so runs made before 1.1.4, or in an earlier output folder, show up too)."""
+        found = [Path(f) for f in self._remembered()]
+        out = Path(self._settings.output) if self._settings.output else None
+        if out and out.is_dir():
+            for pattern, base in (('Compilation */run.json', out), ('Compilation */run.json', out.parent),
+                                  ('*/Compilation */run.json', out)):
+                found += [f.parent for f in base.glob(pattern)]
+        rows, seen = [], set()
+        for folder in found:
+            key = os.path.normcase(str(folder.resolve()))
+            if key in seen: continue
+            seen.add(key)
+            row = self._run_row(folder/'run.json')
+            if row: rows.append(row)
+        self._remember(*(r['folder'] for r in rows))
+        return {'runs': sorted(rows, key=lambda r: r['created'], reverse=True)}
 
     def _drafts(self):
         """Every compilation not rendered yet: stopped, cancelled, in review or waiting on a batch."""

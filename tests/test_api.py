@@ -139,6 +139,25 @@ class ApiFlowTests(unittest.TestCase):
             e = next((x for x in fresh.events(0)['events'] if x['type'] == 'scan_done'), None); time.sleep(.05)
         self.assertEqual((e['cached'], e['to_judge'], e['estimate_usd']), (3, 0, 0))
 
+    def test_history_keeps_runs_after_the_output_folder_changes(self):
+        self.judge()
+        folder = self.api.get_state()['run']['folder']
+        older = Path(self.home.name)/'Compilation 2026-10-01 12-00-00'; older.mkdir()  # Next to the output folder.
+        (older/'run.json').write_text(json.dumps({'created': '2026-10-01T12:00:00', 'status': 'rendered', 'moments': [],
+                                                  'mode': 'reel', 'usd_paid': 0.5}), encoding='utf-8')
+        runs = self.api.history()['runs']
+        self.assertEqual([r['folder'] for r in runs], [folder, str(older)])
+        self.assertEqual(runs[1]['usd'], 0.5)
+        elsewhere = Path(self.home.name)/'new-out'; elsewhere.mkdir()
+        self.api.save_settings({'output': str(elsewhere)})
+        fresh = Api(judge_fn=lambda p, s: self.fail('re-judged'))
+        self.assertEqual(fresh.get_state()['recent'], [])
+        self.assertEqual([r['folder'] for r in fresh.history()['runs']], [folder, str(older)])
+        with patch('clipcompiler.ui.api.os.startfile', create=True) as opened:
+            self.assertTrue(fresh.open_path(str(older))['ok'])
+        opened.assert_called_once()
+        self.assertEqual(fresh.open_run(folder)['run']['folder'], folder)
+
     def test_trim_keeps_a_minimum_length_and_stays_inside_the_preview_window(self):
         self.judge()
         m = self.api.get_review()['moments'][0]

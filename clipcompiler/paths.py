@@ -36,5 +36,10 @@ def hash_index_path():
     return data_dir()/'hash-index.json'
 
 
+def runs_path():
+    """Every compilation folder the app has made or seen, so changing the output folder never hides one."""
+    return data_dir()/'runs.json'
+
+
 def settings_path():
     return config_dir()/'settings.json'

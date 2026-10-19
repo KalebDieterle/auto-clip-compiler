@@ -447,7 +447,8 @@ const RUN_LABEL = { batch_waiting: 'at Google', batch_uploading: 'uploading', ju
 function runRow(r, i) {
   const what = r.status.startsWith('batch') || (r.judge_mode === 'batch' && !r.moments) ? `batch of ${r.batch?.clips ?? '?'} clips` : `${r.moments} moments`;
   const kind = { skill: 'skill · ', both: 'funny + skill · ' }[r.content_mode] || '';
-  return `<div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${kind}${what} · ${r.mode === 'reel' ? 'one video' : 'parts'}</span></div><span class="pill ${r.status}">${RUN_LABEL[r.status] || r.status}</span>`;
+  const cost = r.usd != null ? ` · ${money(r.usd)}` : '';
+  return `<div>${esc(new Date(r.created).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }))}<br><span>${kind}${what} · ${r.mode === 'reel' ? 'one video' : 'parts'}${cost}</span></div><span class="pill ${r.status}">${RUN_LABEL[r.status] || r.status}</span>`;
 }
 async function openRun(folder) {
   if (S.busy) return toast('Wait for the current job to finish.');
@@ -482,6 +483,18 @@ function renderDrafts() {
   });
 }
 onEnter.drafts = () => refreshState();
+
+async function renderHistory() {
+  const runs = (await call('history')).runs;
+  $('#historyEmpty').hidden = !!runs.length;
+  $('#historyList').innerHTML = runs.map((r, i) => `<li data-i="${i}">${runRow(r)}<button class="btn ghost sm folder" title="Show in File Explorer"><svg class="ic"><use href="#i-folder"/></svg>Folder</button></li>`).join('');
+  $$('#historyList li').forEach((li) => {
+    const r = runs[li.dataset.i];
+    li.addEventListener('click', () => openRun(r.folder));
+    li.querySelector('.folder').addEventListener('click', (ev) => { ev.stopPropagation(); call('open_path', r.folder); });
+  });
+}
+onEnter.history = () => renderHistory();
 
 // ---------- judging ----------
 const RING = 326.7;
