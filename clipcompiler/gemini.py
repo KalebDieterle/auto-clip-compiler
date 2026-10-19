@@ -61,6 +61,10 @@ class DailyLimit(Exception):
     """Quota exhausted for the day: stop judging, render what exists."""
 
 
+class SpendLimit(DailyLimit):
+    """The Google project's spend cap is reached or its prepaid credits are gone: stop the same way."""
+
+
 def client(api_key):
     from google import genai
     return genai.Client(api_key=api_key)
@@ -141,6 +145,8 @@ def ask_one(gc, model, path, uploaded, stop, ask, errors):
             text = str(exc)
             if exc.code == 429 and ('per day' in text.lower() or 'PerDay' in text):
                 raise DailyLimit(text) from exc
+            if exc.code == 402 or 'spending cap' in text.lower() or 'credits are depleted' in text.lower():
+                raise SpendLimit(text) from exc   # Retrying cannot help until the owner adds money.
             if exc.code not in (429, 500, 503) or attempt == 6: raise
             wait = min(240, 15 * 2**attempt)
             log.warning('%s: Gemini %s; retrying in %ss', path.name, exc.code, wait)

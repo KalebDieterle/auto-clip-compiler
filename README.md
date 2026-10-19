@@ -40,7 +40,12 @@ Your clips are never modified or moved.
   while your PC can be off, and the app collects the results when you open it.
 - **Pay once per clip.** Every judgment is saved. Re-running, changing settings or rendering again
   never costs anything, and clips waiting in a batch are never sent twice.
-- **Cost estimate before you start** and a budget cap that stops judging before it's exceeded.
+- **Cost estimate before you start** and a budget cap: once spending nears it, nothing new is sent
+  to Google (requests already in flight still finish, so the total can land slightly over).
+- **Setups are kept.** After judging, the app looks back up to 30 s before each kept moment, including
+  the previous replay when the recording runs on, for the line or action the joke builds on (a name
+  callback, the thing that started it) and plays that first. Review shows the quoted line and a
+  button to remove it. It costs under a cent per kept moment and is saved like every judgment.
 - **Stop at any time.** Nothing already judged is lost; an interrupted batch upload resumes.
 - **Drafts.** Every compilation you haven't rendered yet is listed in one place, to reopen or discard
   (discarding moves it to the Recycle Bin and keeps the saved judgments).

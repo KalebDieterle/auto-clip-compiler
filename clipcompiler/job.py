@@ -12,7 +12,7 @@ from pathlib import Path
 import threading
 import time
 
-from . import gemini, skill
+from . import context, gemini, skill
 from .media import Cancelled, probe, window
 from .reel import dedupe, merge_lenses, part_name, part_plan, pick, split_parts, moments_for, day
 from .render import publish
@@ -72,7 +72,7 @@ class JudgeJob:
         self.funny, self.skilled = content_mode in ('funny', 'both'), content_mode in ('skill', 'both')
         self.stop = cancel or threading.Event(); self.reason = None
         self.lock = threading.Lock(); self.local = threading.local()
-        self.report, self.moments, self.done = [], [], 0
+        self.report, self.moments, self.recordings, self.done = [], [], [], 0
         self.usage = {'clips': 0, 'cached': 0, 'failed': 0, 'input_tokens': 0, 'output_tokens': 0,
                       'thinking_tokens': 0, 'usd': 0., 'details': 0}
 
@@ -146,7 +146,7 @@ class JudgeJob:
             return self._account(fresh)
         except gemini.DailyLimit as exc:
             self._account(fresh)
-            return self.halt('daily_limit', str(exc))
+            return self.halt('spend_limit' if isinstance(exc, gemini.SpendLimit) else 'daily_limit', str(exc))
         except Exception as exc:
             text = str(exc)
             if getattr(exc, 'code', None) in (400, 401, 403) and any(h in text.lower() for h in AUTH_HINTS):
@@ -157,6 +157,7 @@ class JudgeJob:
         found = list(moments_for(path, when, hint, funny, meta, digest)) if funny else []
         skilled = list(skill.moments_for(path, when, hint, record, meta, digest, profile)) if record else []
         with self.lock:
+            self.recordings.append(context.recording(when, hint, path, meta['duration'], digest))
             self.usage['clips'] += 1; self.usage['cached'] += not fresh
             spent = self._spend(fresh)
             # Clips already in flight on other workers still bill: stop with room for them.
@@ -228,7 +229,8 @@ class JudgeJob:
         reason = self.reason or ('cancelled' if self.stop.is_set() else None)
         self.usage['judged_seconds'] = round(time.monotonic()-started)
         self.emit({'type': 'judge_done', 'stopped': reason, 'usage': dict(self.usage)})
-        return {'moments': self.moments, 'report': self.report, 'usage': self.usage, 'stopped': reason}
+        return {'moments': self.moments, 'report': self.report, 'usage': self.usage, 'stopped': reason,
+                'recordings': self.recordings}
 
 
 def candidates(moments, min_score, min_skill_score=None):
@@ -258,6 +260,88 @@ def default_keep(cands, target_seconds=None, skill_share=None):
     return {m['id'] for m in pick(cands, target_seconds, skill_share)[0]}
 
 
+LOOKBACK_USD = .0075   # Measured: one look-back ask (~4,000 tokens in, ~1,300 out) on Flash, live.
+# Held back per ask in flight, so concurrent asks cannot overshoot a cap unless one costs over twice the usual.
+LOOKBACK_RESERVE = 2*LOOKBACK_USD
+
+
+def lookback(cands, keep, recordings, cache, scratch, *, api_key=None, model=gemini.DEFAULT_MODEL, workers=4,
+             ffmpeg='ffmpeg', emit=None, cancel=None, cache_only=False, budget_usd=None, ask_fn=None):
+    """Look back before each kept funny moment for the setup it builds on (context.py) and attach what was
+    found as `lead` slices. Answers are cached by the exact footage and question, so re-opening or
+    re-rendering never pays twice; moments asking the identical question share one answer. budget_usd:
+    dollars this pass may spend (None = no cap). Like judging's cap it is approximate: an ask starts only while
+    twice the usual ask's cost still fits, so it is overshot only by answers costing more than that.
+    Returns usage {'asked', 'cached', 'failed', 'usd', token counts}.
+    Tests replace Gemini with ask_fn(window, moment, stop) -> result dict."""
+    emit = emit or (lambda e: None); stop = cancel or threading.Event(); halted = threading.Event()
+    folder = Path(cache)/'context'; folder.mkdir(parents=True, exist_ok=True)
+    usage = {'asked': 0, 'cached': 0, 'failed': 0, 'usd': 0., 'input_tokens': 0, 'output_tokens': 0, 'thinking_tokens': 0}
+    kept = sorted({m['id']: m for m in cands if m['id'] in keep}.values(), key=lambda m: (m['recorded_at'], m['start']))
+    groups = {}   # cache file -> [(moment, window)], one ask each
+    for i, m in enumerate(kept):
+        m['lead'], m['lead_status'] = [], 'none'
+        if 'funny' not in m.get('lenses', ['funny']): continue
+        p = kept[i-1] if i else None
+        w = context.window(m, recordings, (p['clip_wall']+p['start'], p['clip_wall']+p['end'])
+                           if p and p.get('clip_wall') is not None else None)
+        if w: groups.setdefault(folder/f"{context.key(w, m, model)}.json", []).append((m, w))
+    local, lock, done, reserved = threading.local(), threading.Lock(), [0], [0.]
+
+    def ask(m, w):
+        if ask_fn: return ask_fn(w, m, stop)
+        if not hasattr(local, 'client'): local.client = gemini.client(api_key)
+        small = context.proxy(w, scratch, ffmpeg, stop)
+        try:
+            return gemini.upload_and_ask(local.client, model, Path(m['source_path']), small, stop, [context.ask(w, m)])[0]
+        finally:
+            small.unlink(missing_ok=True)
+
+    def one(item):
+        target, members = item; m, w = members[0]
+        result, status = None, 'unanalyzed'
+        try:
+            if target.exists():
+                result = json.loads(target.read_text(encoding='utf-8'))
+                with lock: usage['cached'] += 1
+            elif not (cache_only or stop.is_set() or halted.is_set()):
+                with lock:
+                    room = budget_usd is None or usage['usd']+reserved[0]+LOOKBACK_RESERVE <= budget_usd
+                    if room: reserved[0] += LOOKBACK_RESERVE
+                if not room: halted.set()   # The rest stay unanalyzed: nothing is asked past the cap.
+                else:
+                    try:
+                        result = ask(m, w)
+                        meta = result.get('_meta') or {}
+                        with lock:   # Paid: count it before anything below can fail.
+                            usage['asked'] += 1; usage['usd'] += gemini.cost(meta)
+                            for k in ('input_tokens', 'output_tokens', 'thinking_tokens'): usage[k] += meta.get(k) or 0
+                    finally:
+                        with lock: reserved[0] -= LOOKBACK_RESERVE
+                    atomic_json(target, result)
+        except Cancelled:
+            pass
+        except gemini.DailyLimit:   # Quota or money ran out: no point asking about the rest.
+            halted.set()
+        except Exception as exc:  # One failed look-back only costs that moment its setup.
+            log.warning('%s: look-back failed (%s)', m['clip_name'], exc)
+            status = 'failed'
+            with lock: usage['failed'] += 1
+        for m, w in members:
+            if result is not None:
+                m['lead'] = context.slices(context.plan(result, w), w)
+                m['lead_status'] = 'found' if m['lead'] else 'none'
+            else: m['lead_status'] = status
+        with lock:
+            done[0] += 1
+            emit({'type': 'context', 'done': done[0], 'total': len(groups), 'usd': round(usage['usd'], 4)})
+
+    emit({'type': 'context_start', 'total': len(groups)})
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one, groups.items()))
+    return usage
+
+
 def render_settings(ffmpeg='ffmpeg', ffprobe='ffprobe', height=1080, fps=60, loudnorm=True,
                     timestamp_overlay=False, workers=4, hasher=None):
     return {'ffmpeg': ffmpeg, 'ffprobe': ffprobe, 'fps': fps, 'render_height': height, 'workers': workers,
@@ -275,7 +359,7 @@ def unique(path):
 def render_reel(chosen, out, settings, emit=None, cancel=None, name=None):
     """One chronological video; returns its path. Never overwrites an earlier reel."""
     emit = emit or (lambda e: None); out = Path(out)
-    chosen = sorted(chosen, key=lambda m: (m['recorded_at'], m['start']))
+    chosen = context.resolve(chosen)   # Chronological, with each setup trimmed against what plays around it.
     name = name or f"Highlights ({day(chosen[0]['recorded_at'])} to {day(chosen[-1]['recorded_at'])}).mp4"
     emit({'type': 'render_start', 'parts': 1})
     final = publish(chosen, out, settings, cancel=cancel,
@@ -288,7 +372,7 @@ def render_reel(chosen, out, settings, emit=None, cancel=None, name=None):
 def render_parts(moments, out, part_seconds, settings, emit=None, cancel=None, only=None):
     """Chronological parts; an existing part file is kept, so a re-run renders only what's missing."""
     emit = emit or (lambda e: None); out = Path(out)
-    parts = split_parts(moments, part_seconds); plan = part_plan(parts)
+    parts = split_parts(context.resolve(moments), part_seconds); plan = part_plan(parts)
     emit({'type': 'render_start', 'parts': len(parts), 'plan': plan}); files = []
     for row, part in zip(plan, parts):
         if only and row['part'] not in only: continue

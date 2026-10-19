@@ -232,6 +232,7 @@
           <button class="btn primary" id="bCheck">Check now</button>
           <button class="btn primary" id="bResume" hidden>Resume upload</button>
           <button class="btn ghost" id="bCancel">Cancel batch</button>
+          <button class="btn ghost" id="bSkipLook" hidden>Skip the rest</button>
         </div>
         <p class="hint" id="bHint"></p>
       </div>
@@ -253,13 +254,14 @@
         <aside class="player panel" id="player">
           <div class="video-wrap"><video id="video" preload="auto" playsinline></video><div class="video-load" id="videoLoad"></div></div>
           <div class="trim" id="trim">
-            <div class="trim-track"><div class="kills" id="trimKills"></div><div class="trim-sel" id="trimSel"><i class="h l" data-h="start"></i><i class="h r" data-h="end"></i></div><div class="playhead" id="playhead"></div></div>
+            <div class="trim-track"><div class="kills" id="trimKills"></div><div class="lead-band" id="trimLead" title="Setup that plays first"></div><div class="trim-sel" id="trimSel"><i class="h l" data-h="start"></i><i class="h r" data-h="end"></i></div><div class="playhead" id="playhead"></div></div>
             <div class="trim-times"><span id="tStart"></span><span id="tLen"></span><span id="tEnd"></span></div>
           </div>
           <div class="pmeta"><span class="score" id="pScore"></span><span class="lenses" id="pLenses"></span><span id="pWhen"></span></div>
           <p class="reason" id="pReason"></p>
           <p class="reason second" id="pSkillReason" hidden></p>
           <div class="tags" id="pTags" hidden></div>
+          <div class="lead" id="pLead" hidden><p id="pLeadText"></p><button class="btn" id="pLeadBtn"></button></div>
           <div class="pbtns">
             <button class="btn keep" id="pKeep"><svg class="ic"><use href="#i-check"/></svg>Keep <kbd>K</kbd></button>
             <button class="btn cut" id="pCut"><svg class="ic"><use href="#i-x"/></svg>Cut <kbd>X</kbd></button>

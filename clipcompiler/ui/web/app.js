@@ -108,6 +108,7 @@ function setBusy(kind) {
 const STOP_TEXT = {
   budget: (m) => `Budget cap reached (${m}). Everything judged so far is saved; raise the cap in New to judge more.`,
   daily_limit: () => "Gemini's daily limit was reached. Everything judged so far is saved. Turn on billing in AI Studio, or continue tomorrow.",
+  spend_limit: () => "Your Google project is out of money (spend cap reached or prepaid credits used up). Everything judged so far is saved. Raise the cap or add credits in AI Studio, then continue.",
   auth: () => 'Google rejected the API key. Replace it in Settings.',
   target: () => 'Found enough moments for the target length.',
   cancelled: () => 'Stopped. Everything judged so far is saved and will not be paid for again.',
@@ -134,6 +135,7 @@ function handle(e) {
     case 'batch_collecting': return batchCollecting(e);
     case 'batch_cancelled': S.lastUpload = null; refreshState().then(paintBatch); return;
     case 'scan_cancelled': return;
+    case 'context_start': case 'context': return lookbackProgress(e);
     case 'error':
       toast(e.message, 'bad');
       if (e.job === 'render') renderStopped(e.message);
@@ -535,6 +537,14 @@ function judgeClip(e) {
   $('#feed').prepend(li);
   while ($('#feed').children.length > 60) $('#feed').lastChild.remove();
 }
+function lookbackProgress(e) {
+  // After judging: the look-back asks about each kept moment's setup before the review opens.
+  const text = `Looking back for setups: ${e.done || 0} of ${e.total}`;
+  if (S.screen === 'judging') $('#jEta').textContent = `${e.done || 0}/${e.total} setups`;
+  else if (S.screen === 'batch') { $('#bHint').textContent = text; $('#bSkipLook').hidden = e.done >= e.total; }
+}
+// Stops only the look-back (the batch itself is already collected): the review opens with what was found.
+$('#bSkipLook').addEventListener('click', () => { S.api.cancel(); $('#bSkipLook').hidden = true; });
 function banner(text, kind = 'warn') { const b = $('#judgeBanner'); b.className = `banner ${kind}`; b.textContent = text; b.hidden = false; }
 function judgeStopping(e) {
   const text = STOP_TEXT[e.reason]?.(e.message) || e.message;
@@ -601,8 +611,28 @@ function paintCard(i) {
   const m = S.review.moments[i], el = $(`.card[data-i="${i}"]`); if (!el) return;
   el.classList.toggle('cut', !m.keep);
   $('.mark use', el).setAttribute('href', m.keep ? '#i-check' : '#i-x');
-  $('.len', el).textContent = clock(m.end - m.start).replace(/\.\d$/, '');
+  $('.len', el).textContent = clock(m.end - m.start + leadSeconds(m)).replace(/\.\d$/, '');
 }
+const leadSeconds = (m) => m.lead_on ? m.lead_seconds || 0 : 0;
+// One decision can change what plays before a neighbour: take every moment's fresh plan from the bridge.
+function applyPlays(plays) {
+  S.review.moments.forEach((m, i) => { if (plays?.[m.id]) { Object.assign(m, plays[m.id]); paintCard(i); } });
+}
+function paintLead(m) {
+  const lead = m.lead || [], box = $('#pLead');
+  box.hidden = !lead.length; box.classList.toggle('off', !m.lead_on);
+  const secs = (m.lead_on ? m.lead_seconds || 0 : lead.reduce((a, s) => a + s.seconds, 0)).toFixed(1);
+  const said = lead.flatMap((s) => s.evidence).filter(Boolean).map((t) => `"${t}"`).join(' ');
+  const elsewhere = lead.some((s) => !s.here) ? ' (from the previous replay)' : '';
+  $('#pLeadText').textContent = `${m.lead_on ? 'Plays' : 'Skips'} ${secs} s of setup first${elsewhere}: ${said}`;
+  $('#pLeadBtn').textContent = m.lead_on ? 'Remove setup' : 'Add setup back';
+}
+$('#pLeadBtn').addEventListener('click', async () => {
+  const i = S.sel, m = S.review.moments[i];
+  const r = await call('set_decision', m.id, null, null, null, !m.lead_on);
+  S.review.moments[i] = { ...m, ...r.moment }; S.review.totals = r.totals; applyPlays(r.plays);
+  paintLead(r.moment); paintTrim(r.moment); paintCard(i); totals(r.totals);
+});
 function lensBadges(m) {
   return (m.lenses || ['funny']).map((l) => `<span class="badge ${l}">${l === 'skill' ? 'Skill' : 'Funny'}</span>`).join('');
 }
@@ -641,7 +671,7 @@ async function select(i, play = true) {
   const tags = (m.skill_tags || []).map((t) => `<span class="tag">${esc(t)}</span>`)
     .concat((m.skill_drawbacks || []).map((t) => `<span class="tag minus">${esc(t)}</span>`));
   $('#pTags').hidden = !tags.length; $('#pTags').innerHTML = tags.join('');
-  paintTrim(m); playerButtons(m);
+  paintTrim(m); paintLead(m); playerButtons(m);
   if (!play) return;
   $('#videoLoad').classList.add('on'); video.pause();
   video.removeAttribute('src'); video.poster = m.thumb || ''; video.load();
@@ -650,7 +680,7 @@ async function select(i, play = true) {
   $('#videoLoad').classList.remove('on');
   if (r.error) return toast(r.error, 'bad');
   video.src = r.url; video.dataset.id = m.id;
-  video.onloadedmetadata = () => { video.currentTime = m.start - m.window_start; video.play().catch(() => {}); };
+  video.onloadedmetadata = () => { video.currentTime = from(S.review.moments[i]) - m.window_start; video.play().catch(() => {}); };
 }
 function playerButtons(m) {
   $('#pKeep').style.opacity = m.keep ? 1 : .55; $('#pCut').style.opacity = m.keep ? .55 : 1;
@@ -659,6 +689,8 @@ function paintTrim(m) {
   const span = m.window_end - m.window_start;
   $('#trimKills').innerHTML = (m.kills || []).filter((t) => t >= m.window_start && t <= m.window_end)
     .map((t) => `<i style="left:${(t - m.window_start) / span * 100}%" title="Kill at ${clock(t)}"></i>`).join('');
+  $('#trimLead').innerHTML = segments(m).slice(0, -1).map(([a, b]) =>
+    `<i style="left:${(a - m.window_start) / span * 100}%;width:${(b - a) / span * 100}%"></i>`).join('');
   $('#trimSel').style.left = (m.start - m.window_start) / span * 100 + '%';
   $('#trimSel').style.width = (m.end - m.start) / span * 100 + '%';
   $('#tStart').textContent = clock(m.start); $('#tEnd').textContent = clock(m.end); $('#tLen').textContent = clock(m.end - m.start);
@@ -667,13 +699,20 @@ video.addEventListener('timeupdate', () => {
   const m = S.review?.moments[S.sel]; if (!m || video.dataset.id !== m.id) return;
   const t = video.currentTime + m.window_start, span = m.window_end - m.window_start;
   $('#playhead').style.left = Math.min(100, Math.max(0, (t - m.window_start) / span * 100)) + '%';
-  if (t >= m.end && !video.paused) video.currentTime = m.start - m.window_start;  // Loop the kept span.
+  if (video.paused) return;
+  // Play what the render plays: setup pieces in this recording, then the moment; skip the gaps, then loop.
+  const segs = segments(m), next = segs.find(([a, b]) => t < b);
+  if (!next) video.currentTime = segs[0][0] - m.window_start;
+  else if (next !== segs[0] && t < next[0] - .05) video.currentTime = next[0] - m.window_start;  // Scrubbing before the start stays free.
 });
+// The stretches of this recording that play: setup pieces (when on) and then the moment itself.
+const segments = (m) => m.segments?.length ? m.segments : [[m.start, m.end]];
+const from = (m) => segments(m)[0][0];
 
 async function decide(i, keep, advance = true) {
   const m = S.review.moments[i];
   const r = await call('set_decision', m.id, keep, null, null);
-  S.review.moments[i] = { ...m, ...r.moment }; S.review.totals = r.totals;
+  S.review.moments[i] = { ...m, ...r.moment }; S.review.totals = r.totals; applyPlays(r.plays);
   paintCard(i); totals(r.totals); if (i === S.sel) playerButtons(r.moment);
   if (S.filter !== 'all') applyFilter();
   if (advance) step(1);
@@ -681,7 +720,7 @@ async function decide(i, keep, advance = true) {
 async function trim(start, end) {
   const i = S.sel, m = S.review.moments[i];
   const r = await call('set_decision', m.id, null, start, end);
-  S.review.moments[i] = { ...m, ...r.moment }; S.review.totals = r.totals;
+  S.review.moments[i] = { ...m, ...r.moment }; S.review.totals = r.totals; applyPlays(r.plays);
   paintTrim(r.moment); paintCard(i); totals(r.totals);
 }
 function step(d) {

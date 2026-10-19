@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import keyring
 
+from clipcompiler.media import probe
 from clipcompiler.ui.api import Api, PREVIEW_PAD
 from clipcompiler.ui.server import Server
 from tests.helpers import clip, judgment
@@ -94,6 +95,55 @@ class ApiFlowTests(unittest.TestCase):
         run = json.loads((Path(self.api.get_state()['run']['folder'])/'run.json').read_text(encoding='utf-8'))
         self.assertEqual(run['status'], 'rendered')
         self.assertFalse(run['decisions'][first['id']]['keep'])
+
+    def test_lookback_setup_shows_in_review_can_be_removed_and_renders(self):
+        asked = []
+        def look(w, m, stop):   # Each moment (1-4 s) builds on a line at 0-0.6 s of its own clip.
+            asked.append(m['id'])
+            return {'beats': [{'start': 0, 'end': .6, 'link': 3, 'funny': 0, 'evidence': 'the line', 'why': 'callback'}],
+                    'note': '', '_meta': {'input_tokens': 4000, 'output_tokens': 300, 'thinking_tokens': 600}}
+        self.api = Api(judge_fn=self.api._judge_fn, context_fn=look)
+        self.judge()
+        self.assertEqual(len(asked), 3)
+        review = self.api.get_review(); m = review['moments'][0]
+        self.assertEqual(([(s['start'], s['end'], s['here'], s['evidence']) for s in m['lead']], m['lead_on'], m['play_from']),
+                         ([(0., 1., True, ['the line'])], True, 0.))
+        self.assertEqual((m['window_start'], m['segments'], m['lead_seconds']), (0., [[0., 4.]], 1.))   # Setup joined onto the cut.
+        cut = self.api.set_decision(m['id'], False, .5, None)['moment']   # Cut and trimmed: setup shown as clipped.
+        self.assertEqual((cut['segments'], cut['lead_seconds']), ([[0., .5], [.5, 4.]], .5))
+        self.api.set_decision(m['id'], True, 1., None)
+        off = self.api.set_decision(m['id'], None, None, None, False)['moment']
+        self.assertEqual((off['lead_on'], off['play_from'], off['segments']), (False, 1., [[1., 4.]]))
+        self.assertTrue(self.api.start_render()['ok'])
+        done = self.wait('render_done'); self.wait_idle()
+        # Two moments play from 0 s (setup joined onto the cut), the third from 1 s: 4 + 4 + 3 seconds.
+        self.assertAlmostEqual(sum(probe(Path(f))['duration'] for f in done['files']), 11, delta=.3)
+        self.api = Api(judge_fn=self.api._judge_fn, context_fn=look)   # Re-judging the same clips pays nothing again.
+        self.assertTrue(self.api.scan()['ok']); self.wait('scan_done'); self.wait_idle()
+        self.assertTrue(self.api.start_judge()['ok']); self.wait('review_ready'); self.wait_idle()
+        self.assertEqual(len(asked), 3)
+
+    def test_lookback_still_runs_when_judging_stopped_at_its_target_but_not_after_cancel(self):
+        import threading
+        from clipcompiler import context
+        from clipcompiler.media import recording_time
+        from clipcompiler.reel import moments_for
+        asked = []
+        look = lambda w, m, stop: asked.append(m['id']) or {'beats': [], 'note': '', '_meta': {}}
+        api = Api(judge_fn=self.api._judge_fn, context_fn=look)
+        path = self.source/'2026-10-01 20-00-10.mp4'; when, _ = recording_time(path)
+        found = list(moments_for(path, when, True, judgment((1, 4, 8)), {'duration': 8., 'audio_stream': 1}, 'd1'))
+        recs = [context.recording(when, True, path, 8., 'd1')]
+        run_dir = Path(self.home.name)/'r'; run_dir.mkdir()
+        # Every case leaves the job's stop event set; only the user's Stop (or a cancelled judging) skips paying.
+        for stopped, user_stop, expected in (('cancelled', False, 0), ('target', True, 0), ('target', False, 1)):
+            api._cancel = threading.Event(); api._cancel.set()
+            api._user_cancel = threading.Event()
+            if user_stop: api._user_cancel.set()
+            run = {'content_mode': 'funny', 'min_score': 7, 'skill_share': .4}
+            api._finish_judging(run, run_dir, {'moments': [dict(m) for m in found], 'recordings': recs, 'report': [],
+                                               'usage': {'usd': 0.}, 'stopped': stopped}, None)
+            self.assertEqual(len(asked), expected)
 
     def test_discarding_a_draft_recycles_its_folder_and_keeps_judgments(self):
         self.judge()

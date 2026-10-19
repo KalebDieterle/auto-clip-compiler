@@ -27,11 +27,21 @@ def moments_for(path, when, hint, result, meta, digest):
                    start=start, end=end, duration=meta['duration'], audio_stream=meta['audio_stream'],
                    recorded_at=when, score=int(m['score']), reason=m['why_funny'], transcript='',
                    recommendation='keep', clip_wall=clip_start, clip_name=path.name, lenses=['funny'],
-                   funny_score=int(m['score']))
+                   funny_score=int(m['score']), **{k: m[k] for k in ('setup', 'payoff', 'reaction') if k in m})
 
 
 def wall(m):
     return (m['clip_wall']+m['start'], m['clip_wall']+m['end']) if m['clip_wall'] is not None else None
+
+
+# Save names are whole seconds and Gemini's times are ~1 s accurate, so a recording that starts up to this
+# much after an event's first second still holds the event (it loses that lead-in, never the ending).
+LEAD_SLACK = 1.
+
+
+def holds(m, span, slack=0.):
+    """m's recording covers the wall span, allowing it to start up to `slack` late."""
+    return m['clip_wall']-slack <= span[0] and span[1] <= m['clip_wall']+m['duration']
 
 
 def dedupe(moments):
@@ -45,14 +55,14 @@ def dedupe(moments):
             overlap = min(span[1], other[1]) - max(span[0], other[0])
             if overlap <= .5: continue
             union = (min(span[0], other[0]), max(span[1], other[1]))
-            clip_a = (a['clip_wall'], a['clip_wall']+a['duration'])
-            if clip_a[0] <= union[0] and union[1] <= clip_a[1]:
-                a['start'], a['end'] = union[0]-a['clip_wall'], union[1]-a['clip_wall']  # Same event, one recording.
+            home = next((x for slack in (0., LEAD_SLACK) for x in (a, m) if holds(x, union, slack)), None)
+            if home is a:
+                a['start'], a['end'] = max(0., union[0]-a['clip_wall']), union[1]-a['clip_wall']  # Same event, one recording.
                 keep = False; break
-            if m['clip_wall'] <= union[0] and union[1] <= m['clip_wall']+m['duration']:
+            if home is m:
                 # Only m's recording holds the whole event: play it from there, keep the better score.
                 score = a['score']; a.clear(); a.update(m, score=score)
-                a['start'], a['end'] = union[0]-m['clip_wall'], union[1]-m['clip_wall']
+                a['start'], a['end'] = max(0., union[0]-m['clip_wall']), union[1]-m['clip_wall']
                 keep = False; break
             if overlap >= .5*(span[1]-span[0]):
                 keep = False; break
@@ -130,6 +140,11 @@ def pick(moments, target, skill_share=None):
     return sorted(chosen, key=lambda m: (m['recorded_at'], m['start'])), total
 
 
+def length(m):
+    """Seconds a moment plays: the setup slices the look-back gave it (if any), then the moment itself."""
+    return sum(s['end']-s['start'] for s in m.get('lead') or [])+m['end']-m['start']
+
+
 def split_parts(moments, part_seconds, session_gap=1800):
     """Chronological parts of about part_seconds; once a part is 80% full, prefer to end it between sessions."""
     parts, total, previous = [[]], 0., None
@@ -137,9 +152,9 @@ def split_parts(moments, part_seconds, session_gap=1800):
         gap = m['recorded_at']-previous['recorded_at'] if previous else 0
         if parts[-1] and (total >= part_seconds or (total >= .8*part_seconds and gap > session_gap)):
             parts.append([]); total = 0.
-        parts[-1].append(m); total += m['end']-m['start']; previous = m
+        parts[-1].append(m); total += length(m); previous = m
     # A short leftover tail joins the previous part rather than standing alone.
-    if len(parts) > 1 and sum(m['end']-m['start'] for m in parts[-1]) < .3*part_seconds:
+    if len(parts) > 1 and sum(length(m) for m in parts[-1]) < .3*part_seconds:
         parts[-2].extend(parts.pop())
     return [p for p in parts if p]
 
@@ -150,7 +165,7 @@ def day(t):
 
 def part_plan(parts):
     return [{'part': i, 'from': day(p[0]['recorded_at']), 'to': day(p[-1]['recorded_at']), 'moments': len(p),
-             'minutes': round(sum(m['end']-m['start'] for m in p)/60, 1)} for i, p in enumerate(parts, 1)]
+             'minutes': round(sum(length(m) for m in p)/60, 1)} for i, p in enumerate(parts, 1)]
 
 
 def part_name(row):

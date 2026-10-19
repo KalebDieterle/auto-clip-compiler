@@ -10,7 +10,7 @@ import unittest
 
 
 from clipcompiler.gemini import cost
-from clipcompiler.reel import dedupe, merge_lenses, moments_for, pick, split_parts
+from clipcompiler.reel import dedupe, merge_lenses, moments_for, part_plan, pick, split_parts
 
 PARITY = Path(os.environ.get('LOCALAPPDATA', ''))/'AutoClipCompiler-dev'/'parity'
 
@@ -58,9 +58,35 @@ class DedupeTests(unittest.TestCase):
         out = dedupe([m('a', 9, 4, 12, duration=12), m('b', 7, 0, 3.4, clip_wall=10.5)])
         self.assertEqual([x['id'] for x in out], ['a'])
 
+    def test_later_replay_missing_under_a_second_of_lead_in_still_takes_the_event(self):
+        # Real case (2026-10-17 20-05-05 / 20-05-15, the "rigga" callback): the later save starts 0.283 s
+        # after the event, so without slack the payoff only it holds (8.8 s) was dropped whole.
+        a = m('a', 8, 11.5, 29.983333, clip_wall=475.016667, duration=29.983333)
+        b = m('b', 7, 0., 27., clip_wall=486.8, duration=28.2)
+        out = dedupe([a, b])
+        self.assertEqual([(x['id'], x['score'], x['start'], round(x['end'], 6)) for x in out], [('b', 8, 0., 27.)])
+
+    def test_slack_never_cuts_an_ending(self):
+        # The event runs 0.5 s past the end of every recording: no slack there, so it is not merged.
+        out = dedupe([m('a', 9, 20, 30, duration=30), m('b', 7, 0, 12, clip_wall=19, duration=10.5)])
+        self.assertEqual([x['id'] for x in out], ['a'])
+
+    def test_exact_home_beats_a_slack_home(self):
+        # Union is wall 2.5-12. The accepted (better) recording a needs 0.5 s of slack; b holds it exactly: use b.
+        out = dedupe([m('a', 9, .5, 9, clip_wall=3., duration=20), m('b', 7, 2.5, 8, clip_wall=0., duration=20)])
+        self.assertEqual([(x['id'], x['score'], x['start'], x['end']) for x in out], [('b', 9, 2.5, 12.)])
+
     def test_clips_without_wall_time_are_never_merged(self):
         out = dedupe([m('a', 9, 0, 10, clip_wall=None), m('b', 8, 0, 10, clip_wall=None)])
         self.assertEqual(len(out), 2)
+
+
+class LengthTests(unittest.TestCase):
+    def test_parts_and_plans_count_each_moments_setup(self):
+        moments = [dict(m(str(t), 8, 0, 10, recorded_at=t*60), lead=[dict(start=0, end=10)]) for t in range(6)]
+        parts = split_parts(moments, 30)
+        self.assertEqual([len(p) for p in parts], [2, 2, 2])
+        self.assertEqual([r['minutes'] for r in part_plan(parts)], [.7, .7, .7])
 
 
 class PickTests(unittest.TestCase):

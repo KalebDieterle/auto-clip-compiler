@@ -277,11 +277,12 @@ def plan_by_sound(path, audio, ffmpeg='ffmpeg', cancel=None):
     return [audio[i]['index'] for i in kept]
 
 
-def mix_filter(plan, post=None, label='aout'):
-    """filter_complex text that sums the plan's streams (input 0) into [label] without lowering any of
+def mix_filter(plan, post=None, label='aout', src=0):
+    """filter_complex text that sums the plan's streams (input `src`) into [label] without lowering any of
     them; a limiter catches the peaks two loud tracks can make. `post` appends filters to the mix."""
-    inputs = ''.join(f'[0:{i}]aresample=48000,aformat=channel_layouts=stereo[m{n}];' for n, i in enumerate(plan))
-    return (inputs + ''.join(f'[m{n}]' for n in range(len(plan))) +
+    tag = '' if src == 0 else f'{src}_'   # Unique inner labels when several inputs are mixed in one graph.
+    inputs = ''.join(f'[{src}:{i}]aresample=48000,aformat=channel_layouts=stereo[m{tag}{n}];' for n, i in enumerate(plan))
+    return (inputs + ''.join(f'[m{tag}{n}]' for n in range(len(plan))) +
             f'amix=inputs={len(plan)}:normalize=0:duration=longest,alimiter=limit=0.95:level=0:latency=1' +
             (f',{post}' if post else '') + f'[{label}]')
 
@@ -293,9 +294,11 @@ def audio_args(plan):
     return ['-filter_complex', mix_filter(plan), '-map', '[aout]']
 
 
-def is_silent(path, ffmpeg='ffmpeg'):
-    """True when a file's audio is digital silence (every sample of every channel within a hair of zero)."""
-    raw = command([ffmpeg, '-v', 'error', '-i', path, '-vn', '-ar', '8000', '-f', 's16le', '-'], 300)
+def is_silent(path, ffmpeg='ffmpeg', start=None, duration=None):
+    """True when a file's audio (or the stretch from start for duration seconds) is digital silence: every
+    sample of every channel within a hair of zero."""
+    span = (['-ss', f'{start:.3f}'] if start else []) + (['-t', f'{duration:.3f}'] if duration else [])
+    raw = command([ffmpeg, '-v', 'error', *span, '-i', path, '-vn', '-ar', '8000', '-f', 's16le', '-'], 300)
     pcm = array('h'); pcm.frombytes(raw[:len(raw)//2*2])
     return max(map(abs, pcm), default=0) < 4
 

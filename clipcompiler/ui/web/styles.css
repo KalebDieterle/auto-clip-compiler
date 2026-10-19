@@ -393,6 +393,15 @@ video { width: 100%; height: 100%; display: block; background: #000; }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .tag { font-size: 11.5px; font-weight: 700; padding: 3px 8px; border-radius: 6px; background: var(--skill-soft); color: var(--skill); }
 .tag.minus { background: var(--bad-soft); color: var(--bad); }
+.lead { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); }
+.lead[hidden] { display: none; }
+.lead p { margin: 0; flex: 1; font-size: 13px; }
+.lead.off { background: none; border: 1px dashed var(--muted); }
+.lead.off p { color: var(--muted); }
+.lead .btn { flex: none; padding: 5px 10px; font-size: 12px; }
+.trim-track .lead-band { position: absolute; inset: 0; pointer-events: none; }
+.trim-track .lead-band i { position: absolute; top: 4px; bottom: 4px; border-radius: 6px 0 0 6px;
+  background: repeating-linear-gradient(135deg, var(--accent-soft) 0 6px, transparent 6px 12px); border: 1px dashed var(--accent); border-right: none; }
 .trim-track .kills { position: absolute; inset: 0; pointer-events: none; }
 .trim-track .kills i { position: absolute; top: 3px; bottom: 3px; width: 2px; margin-left: -1px; border-radius: 2px; background: var(--skill); opacity: .9; }
 .chip.skill.hot { background: var(--skill-soft); color: var(--skill); }

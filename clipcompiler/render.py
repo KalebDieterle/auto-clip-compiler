@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from .media import Cancelled, audio_plan, command, is_silent, media_preflight, mix_filter, probe, source_channels
 
 log=logging.getLogger(__name__)
+from .reel import length
 from .store import atomic_json, file_hash
 
 
@@ -24,18 +25,67 @@ def timestamp(seconds):
     return f'{h:02}:{m:02}:{s:02}.{ms:03}'
 
 
+def snap(item,fps):
+    """A cut widened to whole frames, kept inside its source."""
+    c=dict(item)
+    c['start']=math.floor(c['start']*fps+1e-6)/fps
+    c['end']=min(math.ceil(c['end']*fps-1e-6),math.floor(c['duration']*fps))/fps
+    if not 0<=c['start']<c['end']<=c['duration']:
+        raise ValueError(f'Invalid render cut: {c}')
+    return c
+
+
+def slices_of(items):
+    """Every source slice in play order: each moment's setup slices, then the moment."""
+    return [s for c in items for s in (c.get('lead') or [])+[c]]
+
+
+def flat(items):
+    """One row per source slice for the CSV and FCPXML; setup slices carry their moment's id and score."""
+    out=[]
+    for c in items:
+        for s in c.get('lead') or []:
+            out.append(dict(c,**{k:v for k,v in s.items() if k not in ('evidence','id')},recommendation='setup',lead=None))
+        out.append(dict(c,lead=None))
+    return out
+
+
+def follow(p,q,fps):
+    """Snapped slice q plays right after p. Only when q starts inside what p showed (the outward rounding
+    at a join), move q's start to p's last shown instant; earlier or later footage is left alone."""
+    if p['source']==q['source']:
+        if p['start']<=q['start']<p['end']: q['start']=p['end']
+    elif p.get('clip_wall') is not None and q.get('clip_wall') is not None:
+        shown=(p['start']+p['clip_wall'],p['end']+p['clip_wall']); at=q['start']+q['clip_wall']
+        if shown[0]<=at<shown[1]: q['start']=math.ceil((shown[1]-q['clip_wall'])*fps-1e-6)/fps
+
+
+def reconcile(shown,chain,fps):
+    """The slices of `chain` (a setup, then its moment) checked in play order against every slice already
+    shown, so none starts on an instant shown before; a setup slice wholly inside one is dropped."""
+    kept=[]
+    for i,q in enumerate(chain):
+        for p in shown: follow(p,q,fps)
+        if q['end']>q['start'] or i==len(chain)-1:
+            kept.append(q); shown=shown+[q]
+    return kept
+
+
 def frame_cuts(items,fps):
     result=[]
     for item in items:
-        c=dict(item)
-        c['start']=math.floor(c['start']*fps+1e-6)/fps
-        c['end']=min(math.ceil(c['end']*fps-1e-6),math.floor(c['duration']*fps))/fps
-        if not 0<=c['start']<c['end']<=c['duration']:
-            raise ValueError(f'Invalid render cut: {c}')
+        c=snap(item,fps)
+        if c.get('lead'):
+            # A setup and its moment: snapped slices must not show the same instant twice where they meet.
+            c['lead']=reconcile([],[snap(s,fps) for s in c['lead']]+[c],fps)[:-1]
+            if c['end']<=c['start']: raise ValueError(f'Invalid render cut: {c}')
         result.append(c)
     # Rounding outward can duplicate a frame at shared joins. Use the prior end.
     for previous,current in zip(result,result[1:]):
-        if previous['source']==current['source'] and previous['end']>current['start']:
+        if current.get('lead'):
+            # The setup plays first: check it, and everything after it, against all the previous moment showed.
+            current['lead']=reconcile((previous.get('lead') or [])+[previous],current['lead']+[current],fps)[:-1]
+        elif previous['source']==current['source'] and previous['end']>current['start']:
             current['start']=previous['end']
         elif joined(previous,current):
             # A different recording continues the event: start on its first frame at or after
@@ -144,7 +194,8 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
     # Validate each unique content identity immediately before rendering saved decisions.
     hasher=settings.get('hasher') or file_hash
     checked=set()
-    for c in items:
+    for c in slices_of(items):
+        if not Path(c['source_path']).is_file(): raise FileNotFoundError(c['source_path'])
         if c['source_path'] in checked: continue
         if c.get('source_hash') and hasher(Path(c['source_path'])) != c['source_hash']:
             raise ValueError(f'Source changed since analysis: {c["source_path"]}')
@@ -160,7 +211,7 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
         plans=dict(zip(sources,pool.map(plan_for,sources)))
     finally:
         pool.shutdown(cancel_futures=True)
-    for c in items:
+    for c in slices_of(items):
         data,plan=plans[c['source_path']]
         # A caller may pin tracks with audio_streams; otherwise every audio field follows the fresh plan,
         # never values saved alongside an older plan.
@@ -181,7 +232,25 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
     width=round(height*16/9/2)*2
     def encode(pair):
         i,c=pair; dest=work/f'{i:06}.mp4'; duration=c['end']-c['start']
-        plan=c['audio_streams']; run(c,plan,dest,duration)
+        if c.get('lead'):
+            joined_run(c,dest); plan=None
+            bad=hushed(c,dest)
+            if bad:
+                # Same rescue as a single cut, slice by slice: a silent multi-track slice tries each of its
+                # tracks alone while every other slice keeps what already sounds.
+                slices=c['lead']+[c]; picks={}; made={}
+                for k in bad:
+                    for t in range(len(slices[k]['audio_streams']) if len(slices[k]['audio_streams'])>1 else 0):
+                        picks[k]=t; joined_run(c,dest,picks); made=dict(picks)
+                        if k not in hushed(c,dest): break
+                    else: picks.pop(k,None)
+                if made!=picks: joined_run(c,dest,picks)
+                if picks: log.warning('%s: setup + moment mix came out silent; used tracks %s alone',c['source_path'],picks)
+                if hushed(c,dest):
+                    log.warning('%s: segment %d (with its setup) came out silent',c['source_path'],i)
+                    with progress_lock: silent.append(c['id'])
+        else:
+            plan=c['audio_streams']; run(c,plan,dest,duration)
         if plan and is_silent(dest,settings['ffmpeg']):
             # A mix should never cancel out, but if it does, a single sounding track beats silence.
             for track in plan if len(plan)>1 else []:
@@ -204,15 +273,44 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
         args += ['-t',duration,'-map','0:v:0']
         if len(plan)>1: args += ['-filter_complex',mix_filter(plan,post),'-map','[aout]']
         else: args += ['-map',f'0:{plan[0]}' if plan else '1:a:0','-af',post]
+        args += ['-vf',picture(c),'-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p',
+                 '-c:a','aac','-ar','48000','-ac','2',
+                 '-movflags','+faststart',dest]
+        command(args,cancel=cancel); verify_output(dest,duration,settings['ffprobe'],fps)
+    def picture(c):
         vf=f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}'
         if settings.get('timestamp_overlay'):
             label=datetime.datetime.fromtimestamp(c.get('recorded_at',Path(c['source_path']).stat().st_mtime)).strftime('%Y-%m-%d %I.%M %p')
             font='C\\\\:/Windows/Fonts/arial.ttf'
             vf+=f",drawtext=fontfile='{font}':text='{label}':x=20:y=h-th-20:fontsize={max(16,height//40)}:fontcolor=white:box=1:boxcolor=black@0.6"
-        args += ['-vf',vf,'-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p',
-                 '-c:a','aac','-ar','48000','-ac','2',
-                 '-movflags','+faststart',dest]
-        command(args,cancel=cancel); verify_output(dest,duration,settings['ffprobe'],fps)
+        return vf
+    def hushed(c,dest):
+        # Slices with sound in their source that came out silent (an audible setup must not hide a silent payoff).
+        at=0.; out=[]
+        for k,s in enumerate(c['lead']+[c]):
+            d=s['end']-s['start']; edge=min(.1,d/4)   # AAC smears a few ms of a neighbour across each join.
+            if s['audio_streams'] and is_silent(dest,settings['ffmpeg'],at+edge,d-2*edge): out.append(k)
+            at+=d
+        return out
+    def joined_run(c,dest,picks=None):
+        # A moment with its setup: every slice is decoded and joined first, then gets ONE loudness pass,
+        # so the volume cannot jump where the setup meets the moment. picks: {slice: track position} to use alone.
+        slices=c['lead']+[c]; total=length(c); args=[settings['ffmpeg'],'-v','error','-y']; graph=[]
+        for k,s in enumerate(slices):
+            d=s['end']-s['start']; plan=s['audio_streams']; fit=f'apad,atrim=duration={d:.6f}'
+            if picks and k in picks: plan=[plan[picks[k]]]
+            args+=['-ss',s['start'],'-t',d,'-i',s['source_path']]
+            graph.append(f'[{k}:v:0]{picture(s)}[v{k}]')   # Each slice shows its own recording's time.
+            if not plan: graph.append(f'anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={d:.6f}[a{k}]')
+            elif len(plan)==1: graph.append(f'[{k}:{plan[0]}]aresample=48000,aformat=channel_layouts=stereo,{fit}[a{k}]')
+            else: graph.append(mix_filter(plan,fit,label=f'a{k}',src=k))
+        post='loudnorm=I=-16:TP=-1.5:LRA=11,apad' if settings.get('loudnorm') else 'apad'
+        graph.append(''.join(f'[v{k}][a{k}]' for k in range(len(slices)))+f'concat=n={len(slices)}:v=1:a=1[vout][ac]')
+        graph.append(f'[ac]{post}[aout]')
+        args+=['-filter_complex',';'.join(graph),'-map','[vout]','-map','[aout]','-t',total,
+               '-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p',
+               '-c:a','aac','-ar','48000','-ac','2','-movflags','+faststart',dest]
+        command(args,cancel=cancel); verify_output(dest,total,settings['ffprobe'],fps)
     progress_lock=threading.Lock(); done=[0]
     try:
         if settings.get('render',True):
@@ -227,9 +325,9 @@ def publish(items, root, settings, partial=False, omissions=(), on_progress=None
             destination=staging/('Partial_highlights.mp4' if partial else 'Combined_highlights.mp4')
             command([settings['ffmpeg'],'-v','error','-y','-f','concat','-safe','1','-i',listing,
                      '-c','copy','-movflags','+faststart',destination],cancel=cancel)
-            verify_output(destination,sum(c['end']-c['start'] for c in items),settings['ffprobe'],fps)
-        manifest(staging/'manifest.csv',items)
-        if settings.get('resolve'): fcpxml(staging/'Combined.fcpxml',items,fps,height)
+            verify_output(destination,sum(length(c) for c in items),settings['ffprobe'],fps)
+        manifest(staging/'manifest.csv',flat(items))
+        if settings.get('resolve'): fcpxml(staging/'Combined.fcpxml',flat(items),fps,height)
         atomic_json(staging/'selections.json',items)
         atomic_json(staging/'render.json',{'status':'partial' if partial else 'complete','partial':partial,
                                          'omissions':list(omissions),'selected':len(items),'silent_segments':silent})

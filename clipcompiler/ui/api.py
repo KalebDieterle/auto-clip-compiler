@@ -14,9 +14,9 @@ import threading
 import time
 import webbrowser
 
-from .. import APP_NAME, __version__, batch, gemini, job, paths, settings as config, skill
+from .. import APP_NAME, __version__, batch, context, gemini, job, paths, settings as config, skill
 from ..media import Cancelled, audio_args, audio_plan, command, find_ffmpeg
-from ..reel import discover, split_parts
+from ..reel import discover, length, split_parts
 from ..store import HashIndex, atomic_json, awake
 import json
 
@@ -75,12 +75,13 @@ def recycle(folder):
 
 
 class Api:
-    def __init__(self, server=None, judge_fn=None, client_factory=None, skill_fn=None):
+    def __init__(self, server=None, judge_fn=None, client_factory=None, skill_fn=None, context_fn=None):
         self._settings = config.load()
         self._server = server; self._window = None; self._judge_fn = judge_fn; self._skill_fn = skill_fn
+        self._context_fn = context_fn
         self._client_factory = client_factory or gemini.client
         self._lock = threading.RLock(); self._events = []; self._seq = 0
-        self._job = None; self._cancel = None; self._scan = None
+        self._job = None; self._cancel = None; self._user_cancel = None; self._scan = None
         self._run_dir = None; self._run = None
         self._hasher = HashIndex(paths.hash_index_path())
         self._ffmpeg = find_ffmpeg()
@@ -191,7 +192,9 @@ class Api:
         with self._lock:
             if self._job: raise RuntimeError(f'Already {self._job}; cancel it first.')
             if not self._ffmpeg: raise RuntimeError('FFmpeg is missing. Reinstall the app.')
-            self._job = kind; self._cancel = threading.Event()
+            # _cancel is the job's stop (judging also sets it itself, e.g. at its target); _user_cancel only
+            # ever means the user pressed Stop, so a later phase of the same job can still tell.
+            self._job = kind; self._cancel = threading.Event(); self._user_cancel = threading.Event()
 
         def body():
             low_priority(True)
@@ -212,6 +215,7 @@ class Api:
     @safe
     def cancel(self):
         if self._cancel: self._cancel.set()
+        if self._user_cancel: self._user_cancel.set()
         return {'ok': True}
 
     @safe
@@ -361,6 +365,22 @@ class Api:
         keep = job.default_keep(cands, target, run['skill_share'] if mode == 'both' else None)
         for m in cands:
             m['orig_start'], m['orig_end'] = m['start'], m['end']
+        s = self._settings
+        if s.lookback and mode != 'skill' and result.get('recordings'):
+            key = None if (self._context_fn or self._judge_fn) else config.get_key()   # A fake judge never pays here.
+            # Judging that stopped for cost, quota, a bad key or the user only shows saved answers. Reaching
+            # the reel target also sets the job's stop event, so the look-back stops only on the user's Stop.
+            paid = (key or self._context_fn) and result['stopped'] not in ('cancelled', 'budget', 'daily_limit', 'spend_limit', 'auth')
+            cancel = self._user_cancel or threading.Event()
+            room = max(0., s.budget_usd - (result['usage'].get('usd') or 0.)) if s.budget_usd else None
+            scratch = run_dir/'.lookback'; scratch.mkdir(exist_ok=True)
+            spent = job.lookback(cands, keep, result['recordings'], config.cache_dir(s), scratch, api_key=key,
+                                 model=s.model, workers=s.workers, ffmpeg=self._ffmpeg[0], emit=self._emit,
+                                 cancel=cancel, cache_only=not paid, budget_usd=room, ask_fn=self._context_fn)
+            scratch.rmdir() if not any(scratch.iterdir()) else None
+            result['usage']['usd'] = result['usage'].get('usd', 0.) + spent['usd']
+            result['usage']['lookback'] = spent
+            if 'usd_paid' in run: run['usd_paid'] = round(run['usd_paid'] + spent['usd'], 4)   # Batch runs report this.
         with self._lock:
             run.update(status='review', moments=cands, usage=result['usage'], stopped=result['stopped'],
                        decisions={m['id']: {'keep': m['id'] in keep} for m in cands})
@@ -535,13 +555,42 @@ class Api:
         with self._lock:
             if self._run_dir: atomic_json(self._run_dir/'run.json', self._run)
 
-    def _view(self, m):
+    def _plays(self):
+        """What the render will play for each kept moment now: its setup resolved against its neighbours."""
+        return {r['id']: r for r in context.resolve(self._kept())}
+
+    def _play(self, m, start, end, lead_on, plays):
+        """The stretches of the moment's own recording that play (setup pieces, then the moment) and the
+        seconds of setup in front of it. Kept moments use the resolved plan; others show their setup as found."""
+        r = (plays or {}).get(m['id'])
+        if r:
+            segs = [[s['start'], s['end']] for s in r['lead'] if s['source'] == m['source']] + [[r['start'], r['end']]]
+            extra = sum(s['end']-s['start'] for s in r['lead']) + start-r['start']
+        else:
+            lead = [s for s in m.get('lead') or [] if lead_on]
+            segs = sorted([s['start'], min(s['end'], start)] for s in lead if s['source'] == m['source'] and s['start'] < start)
+            extra = sum(b-a for a, b in segs) + sum(s['end']-s['start'] for s in lead if s['source'] != m['source'])
+            segs.append([start, end])
+        return {'segments': segs, 'play_from': segs[0][0], 'lead_seconds': round(extra, 1)}
+
+    def _view(self, m, plays=None):
         d = self._run['decisions'].get(m['id'], {})
         start, end = d.get('start', m['start']), d.get('end', m['end'])
+        lead = m.get('lead') or []; lead_on = d.get('lead', True)
+        # Setup from the same recording widens the preview, so it can be watched; setup from the previous
+        # replay is described only.
+        here = [s['start'] for s in lead if s['source'] == m['source']]
+        window_start = max(0., min([m['orig_start']-PREVIEW_PAD] + here))
         return {'id': m['id'], 'clip': m['clip_name'], 'recorded_at': m['recorded_at'], 'score': m['score'],
                 'reason': m['reason'], 'keep': d.get('keep', True), 'start': start, 'end': end,
                 'orig_start': m['orig_start'], 'orig_end': m['orig_end'], 'duration': m['duration'],
-                'window_start': max(0., m['orig_start']-PREVIEW_PAD), 'window_end': min(m['duration'], m['orig_end']+PREVIEW_PAD),
+                'lead': [{'seconds': round(s['end']-s['start'], 1), 'evidence': s['evidence'], 'here': s['source'] == m['source'],
+                          'start': s['start'], 'end': s['end']} for s in lead],
+                'lead_on': lead_on, 'lead_status': m.get('lead_status'),
+                **self._play(m, start, end, lead_on, plays),
+                # A preview widened to show a setup gets its own file: its start in hundredths, hex.
+                'preview_tag': format(int(window_start*100), 'x') if window_start < max(0., m['orig_start']-PREVIEW_PAD)-1e-6 else '',
+                'window_start': window_start, 'window_end': min(m['duration'], m['orig_end']+PREVIEW_PAD),
                 'lenses': m.get('lenses', ['funny']), 'lens': m.get('lens', m.get('lenses', ['funny'])[0]),
                 'funny_score': m.get('funny_score'), 'skill_score': m.get('skill_score'),
                 'skill_tags': m.get('skill_tags', []), 'skill_drawbacks': m.get('skill_drawbacks', []),
@@ -551,11 +600,11 @@ class Api:
         out = []
         for m in self._run['moments']:
             v = self._view(m)
-            if v['keep']: out.append(dict(m, start=v['start'], end=v['end']))
+            if v['keep']: out.append(dict(m, start=v['start'], end=v['end'], lead=m.get('lead') if v['lead_on'] else []))
         return out
 
     def _totals(self):
-        kept = self._kept(); seconds = sum(m['end']-m['start'] for m in kept)
+        kept = context.resolve(self._kept()); seconds = sum(length(m) for m in kept)
         parts = len(split_parts(kept, self._run['part_minutes']*60)) if self._run['mode'] == 'parts' and kept else (1 if kept else 0)
         return {'kept': len(kept), 'total': len(self._run['moments']), 'minutes': round(seconds/60, 1), 'parts': parts}
 
@@ -657,16 +706,19 @@ class Api:
     @safe
     def get_review(self):
         if not self._run: return {'error': 'No compilation open.'}
-        return {'moments': [self._view(m) for m in self._run['moments']], 'totals': self._totals(),
+        plays = self._plays()
+        return {'moments': [self._view(m, plays) for m in self._run['moments']], 'totals': self._totals(),
                 'run': self._run_summary()}
 
     @safe
-    def set_decision(self, moment_id, keep=None, start=None, end=None):
+    def set_decision(self, moment_id, keep=None, start=None, end=None, lead=None):
+        """keep/cut, trim, and lead: whether the setup the look-back found plays before the moment."""
         with self._lock:
             m = next((m for m in self._run['moments'] if m['id'] == moment_id), None)
             if not m: return {'error': 'Unknown moment'}
             d = self._run['decisions'].setdefault(moment_id, {'keep': True})
             if keep is not None: d['keep'] = bool(keep)
+            if lead is not None: d['lead'] = bool(lead)
             lo, hi = max(0., m['orig_start']-PREVIEW_PAD), min(m['duration'], m['orig_end']+PREVIEW_PAD)
             if start is not None: d['start'] = round(min(max(lo, float(start)), hi-MIN_MOMENT), 2)
             if end is not None: d['end'] = round(max(min(hi, float(end)), lo+MIN_MOMENT), 2)
@@ -675,7 +727,11 @@ class Api:
                 if start is not None: d['end'] = round(min(hi, s0+MIN_MOMENT), 2)
                 else: d['start'] = round(max(lo, e0-MIN_MOMENT), 2)
         self._save_run()
-        return {'moment': self._view(m), 'totals': self._totals()}
+        # One decision can change a neighbour's setup (what plays before it), so every moment's plan comes back.
+        plays = self._plays()
+        others = {x['id']: {k: v[k] for k in ('segments', 'play_from', 'lead_seconds')}
+                  for x in self._run['moments'] for v in [self._view(x, plays)]}
+        return {'moment': self._view(m, plays), 'totals': self._totals(), 'plays': others}
 
     @safe
     def set_all(self, keep, min_score=None):
@@ -692,9 +748,10 @@ class Api:
         folder = paths.previews_dir(); folder.mkdir(parents=True, exist_ok=True)
         # 'a2' (hex, so the media server serves it): previews made before 1.1.2 carried only the first
         # audio track, and 1.1.2's played a [mix, mic] clip's mic twice; those get remade.
-        name = f"{moment_id[:32]}{'a2' if kind == 'mp4' else ''}.{kind}"; target = folder/name
+        v = self._view(m)
+        name = f"{moment_id[:32]}{'a2' + v.get('preview_tag', '') if kind == 'mp4' else ''}.{kind}"; target = folder/name
         if not target.exists():
-            ffmpeg = self._ffmpeg[0]; v = self._view(m); tmp = folder/f'.{name}.tmp.{kind}'
+            ffmpeg = self._ffmpeg[0]; tmp = folder/f'.{name}.tmp.{kind}'
             with (self._media_gate if kind == 'jpg' else self._preview_gate):
                 if kind == 'jpg':
                     at = (m['orig_start']+m['orig_end'])/2

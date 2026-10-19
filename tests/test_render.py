@@ -97,6 +97,40 @@ class FrameJoinTests(unittest.TestCase):
                            dict(id='y', source='s', start=2.01, end=3, duration=9)], 30)
         self.assertEqual(cuts[0]['end'], cuts[1]['start'])
 
+    def test_setup_from_another_replay_never_repeats_an_instant_after_snapping(self):
+        lead = dict(source='b', clip_wall=100., start=10., end=20.007, duration=30.)       # ends at wall 120.007
+        core = dict(id='m', source='a', clip_wall=120., start=.007, end=5., duration=30., lead=[lead])
+        c = frame_cuts([core], 60)[0]
+        self.assertEqual(c['start'], 1/60)
+        self.assertGreaterEqual(c['clip_wall']+c['start'], c['lead'][0]['clip_wall']+c['lead'][0]['end']-1e-9)
+
+    def test_setup_never_repeats_the_last_frame_of_the_moment_before_it(self):
+        before = dict(id='p', source='a', clip_wall=100., start=1., end=7.007, duration=30.)    # Shows up to wall 107.0167.
+        lead = dict(source='a', clip_wall=100., start=7.007, end=9., duration=30.)
+        after = dict(id='m', source='b', clip_wall=105., start=4.5, end=8., duration=30., lead=[lead])
+        cuts = frame_cuts([before, after], 60)
+        self.assertEqual((cuts[0]['end'], cuts[1]['lead'][0]['start']), (421/60, 421/60))
+
+    def test_earlier_setup_from_the_previous_moments_recording_is_kept(self):
+        before = dict(id='p', source='a', clip_wall=100., start=10., end=15., duration=30.)
+        after = dict(id='m', source='b', clip_wall=105., start=20., end=24., duration=30.,
+                     lead=[dict(source='a', clip_wall=100., start=0., end=5., duration=30.)])
+        self.assertEqual([(s['start'], s['end']) for s in frame_cuts([before, after], 60)[1]['lead']], [(0., 5.)])
+
+    def test_a_setup_slice_inside_the_previous_moment_is_dropped_and_the_next_one_reconciled(self):
+        before = dict(id='p', source='a', clip_wall=100., start=1., end=7.007, duration=30.)
+        lead = [dict(source='a', clip_wall=100., start=2., end=6., duration=30.),
+                dict(source='a', clip_wall=100., start=7.007, end=9., duration=30.)]
+        after = dict(id='m', source='b', clip_wall=105., start=4.5, end=8., duration=30., lead=lead)
+        self.assertEqual([(s['start'], s['end']) for s in frame_cuts([before, after], 60)[1]['lead']], [(421/60, 9.)])
+
+    def test_every_setup_slice_is_checked_against_the_previous_moment(self):
+        before = dict(id='p', source='a', clip_wall=100., start=8., end=10.007, duration=30.)   # Shows up to 601/60.
+        lead = [dict(source='a', clip_wall=100., start=5., end=6., duration=30.),
+                dict(source='a', clip_wall=100., start=10.007, end=12., duration=30.)]
+        after = dict(id='m', source='b', clip_wall=105., start=9., end=12., duration=30., lead=lead)
+        self.assertEqual([(s['start'], s['end']) for s in frame_cuts([before, after], 60)[1]['lead']], [(5., 6.), (601/60, 12.)])
+
     def test_ntsc_frame_duration(self):
         self.assertEqual([frame_duration(f) for f in (59.94006, 60, 29.97, 0)], ['1001/60000s', '1/60s', '1001/30000s', None])
 
@@ -136,6 +170,29 @@ class MultitrackTests(unittest.TestCase):
             wav = root/'check.wav'
             command(['ffmpeg', '-v', 'error', '-y', '-i', out/'Combined_highlights.mp4', '-ac', '1', '-ar', '16000', wav])
             self.assertAlmostEqual(dominant_frequency(wav), 880, delta=25)
+
+
+class SetupTests(unittest.TestCase):
+    def test_setup_from_another_replay_plays_first_in_one_segment(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            before = clip(root/'before.mp4', seconds=3, tracks=2, frequency=300)   # Mixed: 300 + 600 Hz.
+            after = clip(root/'after.mp4', seconds=3, frequency=1000)
+            lead = dict(source='b', source_path=str(before), source_hash=file_hash(before), start=1, end=2.5,
+                        duration=probe(before)['duration'], evidence=['line'])
+            item = dict(id='m', source='a', source_path=str(after), source_hash=file_hash(after), start=0, end=2,
+                        duration=probe(after)['duration'], lead=[lead])
+            out = publish([item, dict(item, id='n', lead=None, start=2.2, end=2.9)], root, dict(SETTINGS, workers=1, loudnorm=True))
+            self.assertAlmostEqual(probe(out/'Combined_highlights.mp4')['duration'], 1.5+2+.7, delta=.15)
+            rows = list(csv.DictReader((out/'manifest.csv').open(encoding='utf-8')))
+            self.assertEqual([(r['candidate_id'], r['recommendation'], Path(r['source_path']).name) for r in rows],
+                             [('m', 'setup', 'before.mp4'), ('m', 'keep', 'after.mp4'), ('n', 'keep', 'after.mp4')])
+            clips = ET.parse(out/'Combined.fcpxml').findall('.//asset-clip')
+            self.assertEqual([c.attrib['duration'] for c in clips], ['23/15s', '30/15s', '11/15s'])
+            # The setup really plays first: the opening second carries the older replay's tones.
+            wav = root/'head.wav'
+            command(['ffmpeg', '-v', 'error', '-y', '-i', out/'Combined_highlights.mp4', '-t', '1', '-ac', '1', '-ar', '16000', wav])
+            self.assertNotAlmostEqual(dominant_frequency(wav), 1000, delta=60)
 
 
 if __name__ == '__main__':

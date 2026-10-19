@@ -393,6 +393,37 @@ class PipelineTests(unittest.TestCase):
         pcm = samples(path)
         self.assertGreater(level(pcm, 200), 300); self.assertGreater(level(pcm, 330), 300)
 
+    def test_setup_plus_moment_mix_that_cancels_falls_back_to_one_track(self):
+        """A moment with a setup is one joined segment; its silence rescue works the same as a single cut's."""
+        src = recording(self.root/'cancelling-lead.mkv', [noise(2), noise(2) + ',aeval=-val(0)'], codec=('pcm_s16le',))
+        lead = dict(self.item(src), start=0, end=1, audio_streams=streams(src))
+        with self.assertLogs('clipcompiler.render', 'WARNING') as logs:
+            out, pcm = self.render(dict(self.item(src, audio_streams=streams(src), lead=[lead]), start=1.2, end=2.6))
+        self.assertIn('used track', logs.output[0])
+        self.assertGreater(max(map(abs, pcm)), 1000)
+        self.assertEqual(json.loads((out/'render.json').read_text())['silent_segments'], [])
+
+    def test_an_audible_setup_cannot_hide_a_silent_payoff(self):
+        loud = recording(self.root/'loud-setup.mkv', [noise(3)], codec=('pcm_s16le',))
+        src = recording(self.root/'cancelling-core.mkv', [noise(4), noise(4) + ',aeval=-val(0)'], codec=('pcm_s16le',))
+        lead = dict(self.item(loud), start=0, end=1, audio_streams=streams(loud))
+        with self.assertLogs('clipcompiler.render', 'WARNING') as logs:
+            out, _ = self.render(dict(self.item(src, audio_streams=streams(src), lead=[lead]), start=1, end=2.5))
+        self.assertIn('used track', logs.output[0])
+        self.assertFalse(is_silent(out/'Combined_highlights.mp4', 'ffmpeg', 1.2, 1.))   # The payoff itself has sound.
+
+    def test_each_silent_slice_is_rescued_with_its_own_track(self):
+        # No single track position works for all three slices; each must find its own.
+        a = recording(self.root/'three-a.mkv', [noise(5), noise(5)+',aeval=-val(0)', SILENCE], codec=('pcm_s16le',))
+        b = recording(self.root/'three-b.mkv', [SILENCE, noise(6), noise(6)+',aeval=-val(0)'], codec=('pcm_s16le',))
+        c = recording(self.root/'three-c.mkv', [noise(7), SILENCE, noise(7)+',aeval=-val(0)'], codec=('pcm_s16le',))
+        lead = [dict(self.item(x, audio_streams=streams(x)), start=0, end=1) for x in (a, b)]
+        with self.assertLogs('clipcompiler.render', 'WARNING'):
+            out, _ = self.render(dict(self.item(c, audio_streams=streams(c), lead=lead), start=1, end=2.5))
+        reel = out/'Combined_highlights.mp4'
+        self.assertEqual([is_silent(reel, 'ffmpeg', at, .6) for at in (.2, 1.2, 2.4)], [False, False, False])
+        self.assertEqual(json.loads((out/'render.json').read_text())['silent_segments'], [])
+
     def test_mix_that_cancels_falls_back_to_one_track(self):
         """Even a pinned mix of a track and its exact inverse (lossless audio) never ships silence."""
         src = recording(self.root/'cancelling.mkv', [noise(1), noise(1) + ',aeval=-val(0)'], codec=('pcm_s16le',))
