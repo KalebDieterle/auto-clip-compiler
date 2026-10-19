@@ -109,7 +109,8 @@ const STOP_TEXT = {
   budget: (m) => `Budget cap reached (${m}). Everything judged so far is saved; raise the cap in New to judge more.`,
   daily_limit: () => "Gemini's daily limit was reached. Everything judged so far is saved. Turn on billing in AI Studio, or continue tomorrow.",
   spend_limit: () => "Your Google project is out of money (spend cap reached or prepaid credits used up). Everything judged so far is saved. Raise the cap or add credits in AI Studio, then continue.",
-  auth: () => 'Google rejected the API key. Replace it in Settings.',
+  auth: (m) => /denied access/i.test(m || '') ? 'Google has blocked your project ("denied access"). Everything judged so far is saved. Check billing in AI Studio or contact Google support.'
+    : 'Google rejected the API key. Replace it in Settings.',
   target: () => 'Found enough moments for the target length.',
   cancelled: () => 'Stopped. Everything judged so far is saved and will not be paid for again.',
   batch_expired: () => 'Google did not finish this batch within 48 hours, so nothing was charged. Run it again, or use Live.',

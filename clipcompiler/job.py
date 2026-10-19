@@ -19,7 +19,13 @@ from .render import publish
 from .store import atomic_json, file_hash
 
 log = logging.getLogger(__name__)
-AUTH_HINTS = ('api key not valid', 'api_key_invalid', 'permission denied', 'unauthenticated')
+# A rejected key or a project Google has blocked: every clip would fail the same way, so the run stops.
+AUTH_HINTS = ('api key not valid', 'api_key_invalid', 'permission denied', 'permission_denied', 'denied access',
+              'unauthenticated')
+
+
+def blocked(exc):
+    return getattr(exc, 'code', None) in (400, 401, 403) and any(h in str(exc).lower() for h in AUTH_HINTS)
 MODES = ('funny', 'skill', 'both')
 
 
@@ -149,7 +155,7 @@ class JudgeJob:
             return self.halt('spend_limit' if isinstance(exc, gemini.SpendLimit) else 'daily_limit', str(exc))
         except Exception as exc:
             text = str(exc)
-            if getattr(exc, 'code', None) in (400, 401, 403) and any(h in text.lower() for h in AUTH_HINTS):
+            if blocked(exc):
                 self.halt('auth', text)  # Every clip would fail the same way.
             log.warning('%s: FAILED %s', path.name, text)
             self._account(fresh)
@@ -326,6 +332,7 @@ def lookback(cands, keep, recordings, cache, scratch, *, api_key=None, model=gem
         except Exception as exc:  # One failed look-back only costs that moment its setup.
             log.warning('%s: look-back failed (%s)', m['clip_name'], exc)
             status = 'failed'
+            if blocked(exc): halted.set()   # A rejected key or blocked project fails every ask: stop asking.
             with lock: usage['failed'] += 1
         for m, w in members:
             if result is not None:

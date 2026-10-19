@@ -180,6 +180,15 @@ class LookbackJobTests(unittest.TestCase):
         self.assertEqual(sorted([one['lead_status'], two['lead_status']]), ['unanalyzed', 'unanalyzed'])
         self.assertEqual(usage['asked'], 0)
 
+    def test_a_blocked_project_stops_asking(self):
+        class Denied(Exception):
+            code = 403
+        def denied(w, m, stop):
+            self.calls.append(m['id']); raise Denied('403 PERMISSION_DENIED. Your project has been denied access.')
+        one, two = moment(), moment(source='a', clip_wall=100., start=20., end=26., recorded_at=130.)
+        self.run_once([one, two], {one['id'], two['id']}, ask=denied)
+        self.assertEqual(len(self.calls), 1)
+
     def test_a_failed_ask_costs_only_that_moment_its_setup(self):
         def boom(w, m, stop): raise RuntimeError('500')
         m = moment()
