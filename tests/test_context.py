@@ -101,6 +101,12 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual((out['start'], out['lead']), (10., []))
         self.assertEqual(m['start'], 15.)   # Input untouched.
 
+    def test_setup_never_joins_across_or_into_footage_an_earlier_compilation_played(self):
+        joined = context.resolve([moment(lead=[lead('b', 120., 8., 14.)])])[0]
+        self.assertEqual((joined['start'], joined['lead']), (8., []))   # Without history: one straight cut.
+        out = context.resolve([moment(lead=[lead('b', 120., 8., 14.)], avoid=[[133., 135.]])])[0]
+        self.assertEqual((out['start'], [(s['start'], s['end']) for s in out['lead']]), (15., [(8., 13.)]))
+
     def test_setup_with_a_gap_stays_a_separate_slice(self):
         out = context.resolve([moment(lead=[lead('b', 120., 8., 12.)])])[0]
         self.assertEqual((out['start'], [(s['start'], s['end']) for s in out['lead']]), (15., [(8., 12.)]))

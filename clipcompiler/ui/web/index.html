@@ -326,6 +326,12 @@
           <label class="toggle"><input type="checkbox" id="timestamp"><i></i><span>Show recording date on each moment</span></label>
         </div>
         <div class="panel">
+          <h3>Choosing moments</h3>
+          <label class="toggle"><input type="checkbox" id="skipShown"><i></i><span>Leave out moments already in a rendered compilation</span></label>
+          <label class="toggle"><input type="checkbox" id="lookback"><i></i><span>Look back for each funny moment's setup</span></label>
+          <p class="hint">Only moments that made it into a finished video count, not ones you cut in Review. Applies to the next compilation you judge.</p>
+        </div>
+        <div class="panel">
           <h3><svg class="ic"><use href="#i-target"/></svg>Skill judging</h3>
           <div class="field"><label>Game</label><div class="seg" id="gameOverride"><button data-v="auto">Detect</button><button data-v="cs2">CS2</button><button data-v="rust">Rust</button><button data-v="generic">Other</button><i class="seg-glider"></i></div></div>
           <p class="hint">Detect picks the rules per clip: tuned for Counter-Strike 2 and Rust, general shooter rules for anything else. Skill is scored on difficulty and situation, not kill count.</p>

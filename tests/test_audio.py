@@ -389,7 +389,8 @@ class PipelineTests(unittest.TestCase):
                                _view=lambda m: {'window_start': 0, 'window_end': 2.5})
         with patch('clipcompiler.ui.api.paths.previews_dir', return_value=self.root/'previews'):
             path = Api._media(stub, 'pair-preview', 'mp4')
-        self.assertTrue(path.endswith('a2.mp4'))
+        from clipcompiler.store import identity   # Named by the exact window it shows ('a3' retires older previews).
+        self.assertEqual(Path(path).name, identity(['pair-preview', 'a3', 0, 2.5])[:40] + '.mp4')
         pcm = samples(path)
         self.assertGreater(level(pcm, 200), 300); self.assertGreater(level(pcm, 330), 300)
 

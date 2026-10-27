@@ -1,5 +1,7 @@
 """Turn cached judgments into a reel: clip discovery, replay dedupe, picking and splitting into parts."""
+import bisect
 import datetime
+import math
 from pathlib import Path
 
 from .media import VIDEO_EXTS, recording_time
@@ -81,6 +83,97 @@ def overlap(a, b):
     wa, wb = wall(a), wall(b)
     if wa is None or wb is None: return 0.
     return min(wa[1], wb[1]) - max(wa[0], wb[0])
+
+
+def footage(m):
+    """The stretches a played moment showed: its setup slices, then the moment itself."""
+    return [{k: s.get(k) for k in ('source', 'start', 'end', 'clip_wall')} for s in (m.get('lead') or [])+[m]]
+
+
+def valid_footage(s):
+    """A footage slice read back from run.json is usable (older or hand-edited files may not be)."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return (isinstance(s, dict) and num(s.get('start')) and num(s.get('end')) and s['end'] > s['start']
+            and (s.get('clip_wall') is None or num(s['clip_wall'])) and isinstance(s.get('source'), (str, type(None)))
+            and (s.get('source') is not None or s.get('clip_wall') is not None))
+
+
+def normal_footage(s):
+    """Just the keys footage is matched on, the optional ones present (None when absent)."""
+    return {'source': s.get('source'), 'start': s['start'], 'end': s['end'], 'clip_wall': s.get('clip_wall')}
+
+
+def shown_wall(p, x):
+    """Shown slice p as a wall span on x's clock: through x's own clock when they are the same recording (its
+    digest matches even if its file name, and so its wall clock, differs), else p's own; None if neither."""
+    if p['source'] and p['source'] == x.get('source') and x.get('clip_wall') is not None:
+        return (x['clip_wall']+p['start'], x['clip_wall']+p['end'])
+    return wall(p)
+
+
+class Footage:
+    """Footage earlier compilations played, indexed so each moment is compared only with slices from its
+    own recording or near it in wall time. Duplicate slices (a run rendered twice) count once."""
+    def __init__(self, slices):
+        unique = {(s.get('source'), s['start'], s['end'], s.get('clip_wall')): normal_footage(s)
+                  for s in slices if valid_footage(s)}
+        self.slices = list(unique.values()); self.by_source = {}
+        for s in self.slices:
+            if s['source']: self.by_source.setdefault(s['source'], []).append(s)
+        walls = sorted(((w[0], w[1], i) for i, s in enumerate(self.slices) for w in [wall(s)] if w))
+        self.starts = [w[0] for w in walls]; self.walls = walls
+        self.longest = max((b-a for a, b, _ in walls), default=0.)
+
+    def __bool__(self):
+        return bool(self.slices)
+
+    def near(self, m):
+        out = {id(s): s for s in self.by_source.get(m.get('source'), [])} if m.get('source') else {}
+        w = wall(m) if m.get('clip_wall') is not None else None
+        if w:
+            lo, hi = bisect.bisect_left(self.starts, w[0]-self.longest), bisect.bisect_right(self.starts, w[1])
+            for a, b, i in self.walls[lo:hi]:
+                if b > w[0]: out[id(self.slices[i])] = self.slices[i]
+        return list(out.values())
+
+
+def _covered(m, shown):
+    """The union of shown footage inside m, as spans of m's clip time."""
+    spans = []
+    for p in shown.near(m):
+        if m.get('source') and m['source'] == p.get('source'): a, b = p['start'], p['end']
+        elif m.get('clip_wall') is not None and p.get('clip_wall') is not None:
+            a, b = p['clip_wall']+p['start']-m['clip_wall'], p['clip_wall']+p['end']-m['clip_wall']
+        else: continue
+        a, b = max(a, m['start']), min(b, m['end'])
+        if b > a: spans.append([a, b])
+    union = []
+    for a, b in sorted(spans):
+        if union and a <= union[-1][1]: union[-1][1] = max(union[-1][1], b)
+        else: union.append([a, b])
+    return union
+
+
+def unseen(moments, shown, min_seconds=2.):
+    """Moments without footage an earlier compilation already played (shown: a Footage or a list of slices).
+    Like replay dedupe: one at least half shown is dropped; one partly shown keeps its longest new stretch
+    (if min_seconds remain), under a new id since its bounds changed. A skill play is trimmed only if every
+    kill stays in what is left, so its score and tags still describe what plays. Returns new dicts."""
+    shown = shown if isinstance(shown, Footage) else Footage(shown)
+    out = []
+    for m in moments:
+        union = _covered(m, shown) if shown else []
+        covered = sum(b-a for a, b in union)
+        if covered <= .5: out.append(dict(m)); continue
+        if covered >= .5*(m['end']-m['start']): continue
+        edges = [m['start']] + [t for span in union for t in span] + [m['end']]
+        gaps = [(b-a, a, b) for a, b in zip(edges[::2], edges[1::2]) if b > a]
+        size, a, b = max(gaps)
+        if size < min_seconds or any(not a <= t <= b for t in m.get('kills') or []): continue
+        m = dict(m, start=a, end=b)
+        if m.get('source') and 'id' in m: m['id'] = identity([m['source'], a, b])
+        out.append(m)
+    return out
 
 
 def absorb(f, s):

@@ -43,6 +43,7 @@ class Settings:
     skill_share: float = .4          # Both mode: target fraction of the reel that is skill plays.
     game_override: str = 'auto'      # 'auto' (detected per clip), 'cs2', 'rust' or 'generic'.
     lookback: bool = True            # After judging, look back before each kept funny moment for its setup.
+    skip_shown: bool = False         # Leave out moments a rendered compilation already played.
 
     def problems(self):
         checks = [(self.mode in ('reel', 'parts'), 'mode must be reel or parts'),

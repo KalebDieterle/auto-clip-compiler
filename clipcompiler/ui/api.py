@@ -16,8 +16,8 @@ import webbrowser
 
 from .. import APP_NAME, __version__, batch, context, gemini, job, paths, settings as config, skill
 from ..media import Cancelled, audio_args, audio_plan, command, find_ffmpeg
-from ..reel import discover, length, split_parts
-from ..store import HashIndex, atomic_json, awake
+from ..reel import Footage, discover, footage, length, shown_wall, split_parts, valid_footage, wall
+from ..store import HashIndex, atomic_json, awake, identity
 import json
 
 log = logging.getLogger(__name__)
@@ -322,7 +322,7 @@ class Api:
         key = config.get_key()
         unready = any(not self._ready(r, mode) for r in rows)
         if unready and not key: return {'error': 'Add your Gemini API key in Settings first.'}
-        run_dir = Path(s.output)/datetime.datetime.now().strftime('Compilation %Y-%m-%d %H-%M-%S')
+        run_dir = job.unique(Path(s.output)/datetime.datetime.now().strftime('Compilation %Y-%m-%d %H-%M-%S'))
         run_dir.mkdir(parents=True); self._remember(run_dir)
         batch_mode = s.judge_mode == 'batch' and unready
         run = {'created': datetime.datetime.now().isoformat(timespec='seconds'),
@@ -331,7 +331,7 @@ class Api:
                'mode': s.mode, 'min_score': s.min_score, 'target_minutes': s.target_minutes,
                'part_minutes': s.part_minutes, 'moments': [], 'decisions': {}, 'files': [],
                'content_mode': mode, 'min_skill_score': s.min_skill_score, 'skill_share': s.skill_share,
-               'skill_preset': s.skill_preset, 'game_override': s.game_override,
+               'skill_preset': s.skill_preset, 'game_override': s.game_override, 'skip_shown': s.skip_shown,
                'clips': [[r['when'], r['hint'], str(r['path'])] for r in rows]}
         with self._lock: self._run_dir, self._run = run_dir, run
         self._save_run()
@@ -345,7 +345,7 @@ class Api:
                                   min_score=s.min_score, target_seconds=target, hasher=self._hasher,
                                   ffmpeg=self._ffmpeg[0], ffprobe=self._ffmpeg[1], emit=self._emit,
                                   cancel=cancel, judge_fn=self._judge_fn, skill_fn=self._skill_fn,
-                                  **self._skill_options(run)).run()
+                                  shown=self._shown_before(run), **self._skill_options(run)).run()
             scratch.rmdir() if scratch.exists() and not any(scratch.iterdir()) else None
             self._finish_judging(run, run_dir, result, target)
         return self._start('judge', work)
@@ -381,6 +381,23 @@ class Api:
             result['usage']['usd'] = result['usage'].get('usd', 0.) + spent['usd']
             result['usage']['lookback'] = spent
             if 'usd_paid' in run: run['usd_paid'] = round(run['usd_paid'] + spent['usd'], 4)   # Batch runs report this.
+        shown = Footage(result.get('shown') or [])
+        for m in cands if shown else []:
+            # Setup footage an earlier compilation already played is cut out, and `avoid` keeps context.resolve
+            # from joining a setup to its moment across it. The query spans the gaps a join could fill.
+            pieces = (m.get('lead') or [])+[m]
+            walls = [w for x in pieces if x.get('clip_wall') is not None for w in [wall(x)]]
+            span = [{'source': None, 'clip_wall': 0., 'start': min(w[0] for w in walls), 'end': max(w[1] for w in walls)}] if walls else []
+            # Footage from these very recordings maps through their current clock only (their own pieces), never
+            # through the clock it was rendered under (a renamed file's would be wrong).
+            own = {x.get('source') for x in pieces} - {None}
+            avoid = sorted({tuple(w) for x in pieces for p in shown.near(x) for w in [shown_wall(p, x)] if w}
+                           | {tuple(w) for x in span for p in shown.near(x) if p['source'] not in own for w in [wall(p)] if w})
+            if not avoid: continue
+            m['avoid'] = [list(w) for w in avoid]
+            if m.get('lead'):
+                m['lead'] = [q for s in m['lead'] for q in context.cut_all(s, avoid) if q['end']-q['start'] >= .05]
+                if not m['lead'] and m.get('lead_status') == 'found': m['lead_status'] = 'none'
         with self._lock:
             run.update(status='review', moments=cands, usage=result['usage'], stopped=result['stopped'],
                        decisions={m['id']: {'keep': m['id'] in keep} for m in cands})
@@ -509,8 +526,9 @@ class Api:
             # Rebuild moments from the cache (no API calls); only failures are worth showing.
             quiet = lambda e: self._emit(e) if e['type'] == 'clip' and e['status'] == 'failed' else None
             result = job.JudgeJob(self._run_clips(run), config.cache_dir(self._settings), run_dir, cache_only=True,
+                                  min_score=run['min_score'],
                                   hasher=self._hasher, ffprobe=self._ffmpeg[1], emit=quiet, cancel=cancel,
-                                  **self._skill_options(run)).run()
+                                  shown=self._shown_before(run), **self._skill_options(run)).run()
             result['usage']['usd'] = run.get('usd_paid', 0.)
             if state and state.get('job') and state.get('status') != 'JOB_STATE_SUCCEEDED':
                 result['stopped'] = 'batch_' + state['status'].replace('JOB_STATE_', '').lower()
@@ -588,8 +606,6 @@ class Api:
                           'start': s['start'], 'end': s['end']} for s in lead],
                 'lead_on': lead_on, 'lead_status': m.get('lead_status'),
                 **self._play(m, start, end, lead_on, plays),
-                # A preview widened to show a setup gets its own file: its start in hundredths, hex.
-                'preview_tag': format(int(window_start*100), 'x') if window_start < max(0., m['orig_start']-PREVIEW_PAD)-1e-6 else '',
                 'window_start': window_start, 'window_end': min(m['duration'], m['orig_end']+PREVIEW_PAD),
                 'lenses': m.get('lenses', ['funny']), 'lens': m.get('lens', m.get('lenses', ['funny'])[0]),
                 'funny_score': m.get('funny_score'), 'skill_score': m.get('skill_score'),
@@ -597,10 +613,17 @@ class Api:
                 'skill_reason': m.get('skill_reason'), 'game': m.get('game'), 'kills': m.get('kills', [])}
 
     def _kept(self):
+        return self._kept_of(self._run)
+
+    @staticmethod
+    def _kept_of(run):
+        """A run's kept moments as Review decided them: trims applied, setup only where it is on."""
         out = []
-        for m in self._run['moments']:
-            v = self._view(m)
-            if v['keep']: out.append(dict(m, start=v['start'], end=v['end'], lead=m.get('lead') if v['lead_on'] else []))
+        for m in run['moments']:
+            d = run['decisions'].get(m['id'], {})
+            if d.get('keep', True):
+                out.append(dict(m, start=d.get('start', m['start']), end=d.get('end', m['end']),
+                                lead=m.get('lead') if d.get('lead', True) else []))
         return out
 
     def _totals(self):
@@ -651,25 +674,50 @@ class Api:
                 paths.runs_path().parent.mkdir(parents=True, exist_ok=True)
                 atomic_json(paths.runs_path(), known+new)
 
-    @safe
-    def history(self):
-        """Every compilation, newest first: the remembered ones plus any found in, next to or one level
-        under the output folder (so runs made before 1.1.4, or in an earlier output folder, show up too)."""
+    def _run_folders(self):
+        """Every compilation folder once: the remembered ones plus any found in, next to or one level under
+        the output folder (so runs made before 1.1.4, or in an earlier output folder, count too)."""
         found = [Path(f) for f in self._remembered()]
         out = Path(self._settings.output) if self._settings.output else None
         if out and out.is_dir():
             for pattern, base in (('Compilation */run.json', out), ('Compilation */run.json', out.parent),
                                   ('*/Compilation */run.json', out)):
                 found += [f.parent for f in base.glob(pattern)]
-        rows, seen = [], set()
+        folders, seen = [], set()
         for folder in found:
             key = os.path.normcase(str(folder.resolve()))
-            if key in seen: continue
-            seen.add(key)
-            row = self._run_row(folder/'run.json')
-            if row: rows.append(row)
+            if key not in seen: seen.add(key); folders.append(folder)
+        return folders
+
+    @safe
+    def history(self):
+        """Every compilation, newest first."""
+        rows = [r for r in (self._run_row(f/'run.json') for f in self._run_folders()) if r]
         self._remember(*(r['folder'] for r in rows))
         return {'runs': sorted(rows, key=lambda r: r['created'], reverse=True)}
+
+    def _legacy_shown(self, run):
+        """What a run rendered before 1.1.5 played, rebuilt from its saved Review decisions (it did not record it)."""
+        return [s for m in context.resolve(self._kept_of(run)) for s in footage(m)]
+
+    def _shown_before(self, run):
+        """With the run's skip_shown on: the footage every compilation's videos played (reel.footage).
+        Malformed slices are skipped (reel.valid_footage)."""
+        if not run.get('skip_shown'): return []
+        shown = []
+        for folder in self._run_folders():
+            try:
+                data = json.loads((folder/'run.json').read_text(encoding='utf-8'))
+                if 'shown' in data:
+                    if not isinstance(data['shown'], list): raise TypeError('shown is not a list')
+                    shown += data['shown']
+                elif data.get('status') == 'rendered':
+                    shown += self._legacy_shown(data)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                log.warning('%s: cannot read what it rendered', folder)
+        good = [s for s in shown if valid_footage(s)]
+        if len(good) < len(shown): log.warning('%d unreadable footage entries skipped', len(shown)-len(good))
+        return good
 
     def _drafts(self):
         """Every compilation not rendered yet: stopped, cancelled, in review or waiting on a batch."""
@@ -701,6 +749,13 @@ class Api:
         data = json.loads((path/'run.json').read_text(encoding='utf-8'))
         if data['status'] == 'judging': data['status'] = 'review'  # Interrupted: review what was saved.
         with self._lock: self._run_dir, self._run = path, data
+        if data['status'] == 'rendered' and 'shown' not in data:
+            # Rendered before 1.1.5: record what it played now, before Review edits change its decisions.
+            try:
+                with self._lock: data['shown'] = self._legacy_shown(data)
+                self._save_run()
+            except (KeyError, TypeError, ValueError, AttributeError):
+                log.warning('%s: cannot rebuild what it rendered', path)
         return self.get_review()
 
     @safe
@@ -746,10 +801,13 @@ class Api:
         m = next((m for m in self._run['moments'] if m['id'] == moment_id), None)
         if not m: raise ValueError('Unknown moment')
         folder = paths.previews_dir(); folder.mkdir(parents=True, exist_ok=True)
-        # 'a2' (hex, so the media server serves it): previews made before 1.1.2 carried only the first
-        # audio track, and 1.1.2's played a [mix, mic] clip's mic twice; those get remade.
+        # A preview is named by the exact window it shows (hex, so the media server serves it): a moment whose
+        # bounds changed under the same id (trimmed against earlier compilations, merged by replay dedupe, or
+        # widened for a setup) never reuses a stale file. 'a3' retires older previews (pre-1.1.2 ones carried
+        # only the first audio track; 1.1.2's played a [mix, mic] clip's mic twice).
         v = self._view(m)
-        name = f"{moment_id[:32]}{'a2' + v.get('preview_tag', '') if kind == 'mp4' else ''}.{kind}"; target = folder/name
+        stem = identity([moment_id, 'a3', round(v['window_start'], 3), round(v['window_end'], 3)])[:40] if kind == 'mp4' else moment_id[:32]
+        name = f'{stem}.{kind}'; target = folder/name
         if not target.exists():
             ffmpeg = self._ffmpeg[0]; tmp = folder/f'.{name}.tmp.{kind}'
             with (self._media_gate if kind == 'jpg' else self._preview_gate):
@@ -785,11 +843,20 @@ class Api:
         settings = job.render_settings(self._ffmpeg[0], self._ffmpeg[1], height=s.height, fps=s.fps, loudnorm=s.loudnorm,
                                        timestamp_overlay=s.timestamp_overlay, workers=s.workers, hasher=self._hasher)
 
+        def played(moments):
+            # `shown` gathers what every video of this run played (setups trimmed as rendered), so a later run
+            # can leave it out. Saved as each video is made, so one that stops part-way keeps its finished
+            # parts; an earlier render's videos stay on disk, so their footage stays counted.
+            with self._lock: run['shown'] = run.get('shown', []) + [s for m in moments for s in footage(m)]
+            self._save_run()
+
         def work(cancel):
-            if run['mode'] == 'parts':
-                files, _ = job.render_parts(kept, run_dir, run['part_minutes']*60, settings, emit=self._emit, cancel=cancel)
+            if run['mode'] == 'parts':   # Only parts encoded now count; existing part files were counted then.
+                files, _ = job.render_parts(kept, run_dir, run['part_minutes']*60, settings, emit=self._emit,
+                                            cancel=cancel, on_played=played)
             else:
                 files = [str(job.render_reel(kept, run_dir, settings, emit=self._emit, cancel=cancel))]
+                played(context.resolve(kept))
             with self._lock: run.update(status='rendered', files=files)
             self._save_run()
         return self._start('render', work)

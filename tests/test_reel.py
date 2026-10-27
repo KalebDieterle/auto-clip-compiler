@@ -10,7 +10,8 @@ import unittest
 
 
 from clipcompiler.gemini import cost
-from clipcompiler.reel import dedupe, merge_lenses, moments_for, part_plan, pick, split_parts
+from clipcompiler.reel import (Footage, dedupe, footage, merge_lenses, moments_for, part_plan, pick, shown_wall,
+                               split_parts, unseen)
 
 PARITY = Path(os.environ.get('LOCALAPPDATA', ''))/'AutoClipCompiler-dev'/'parity'
 
@@ -35,6 +36,69 @@ class MomentsForTests(unittest.TestCase):
         found = list(moments_for(Path('c.mp4'), 1000., False, {'moments': [dict(start=1, end=4, score=7, why_funny='x')]},
                                  {'duration': 20., 'audio_stream': None}, 'h'))
         self.assertIsNone(found[0]['clip_wall'])
+
+
+class UnseenTests(unittest.TestCase):
+    """Leaving out footage an earlier compilation played (reel.unseen, fed by reel.footage)."""
+    def test_same_recording_mostly_shown_is_dropped_and_untouched_kept(self):
+        shown = footage(dict(m('old', 8, 2, 10), source='A'))
+        out = unseen([dict(m('a', 8, 3, 10), source='A'), dict(m('b', 8, 3, 10), source='B', clip_wall=100.)], shown)
+        self.assertEqual([x['id'] for x in out], ['b'])
+
+    def test_overlapping_replay_save_counts_through_wall_time(self):
+        shown = footage(dict(m('old', 8, 10, 20, clip_wall=0.), source='A'))   # Wall 10-20.
+        out = unseen([dict(m('a', 8, 2, 12, clip_wall=8.), source='B')], shown)    # Wall 10-20 again, other file.
+        self.assertEqual(out, [])
+
+    def test_partly_shown_keeps_only_new_footage(self):
+        shown = footage(dict(m('old', 8, 0, 4), source='A'))
+        out = unseen([dict(m('a', 8, 2, 12), source='A')], shown)
+        self.assertEqual([(x['start'], x['end']) for x in out], [(4, 12)])
+
+    def test_setup_that_played_counts_as_shown(self):
+        old = dict(m('old', 8, 10, 14), source='A', lead=[dict(source='B', start=1, end=6, clip_wall=None)])
+        out = unseen([dict(m('a', 8, 1, 7, clip_wall=None), source='B')], footage(old))
+        self.assertEqual(out, [])
+
+    def test_coverage_is_the_union_so_order_does_not_matter(self):
+        a, b = dict(m('x', 8, 0, 3), source='A'), dict(m('y', 8, 6, 9), source='A')   # 6 of 10 s shown.
+        for shown in ([a, b], [b, a]):
+            self.assertEqual(unseen([dict(m('c', 8, 0, 10), source='A')], [s for x in shown for s in footage(x)]), [])
+
+    def test_longest_new_stretch_is_kept_under_a_new_id(self):
+        shown = footage(dict(m('x', 8, 3, 5), source='A'))
+        out = unseen([dict(m('c', 8, 0, 12), source='A')], shown)
+        self.assertEqual([(x['start'], x['end']) for x in out], [(5, 12)])
+        self.assertNotEqual(out[0]['id'], 'c')   # Previews are cached by id: new bounds, new id.
+
+    def test_skill_play_is_dropped_rather_than_trimmed_away_from_its_kill(self):
+        shown = footage(dict(m('x', 8, 0, 4), source='A'))
+        play = dict(m('k', 9, 0, 10), source='A', kills=[2.])
+        self.assertEqual(unseen([play], shown), [])
+        kept = unseen([dict(play, kills=[8.])], shown)   # Kill still in what is left: trimmed, still a play.
+        self.assertEqual([(x['start'], x['end']) for x in kept], [(4, 10)])
+
+    def test_malformed_footage_is_ignored(self):
+        bad = [{}, {'start': 'x'}, {'source': 'A', 'start': 5, 'end': 1}, {'source': 'A', 'start': 0, 'end': float('inf')}]
+        out = unseen([dict(m('a', 8, 0, 10), source='A')], bad)
+        self.assertEqual([x['id'] for x in out], ['a'])
+        self.assertEqual(Footage([{'source': 'A', 'start': 0, 'end': 4}]).slices[0]['clip_wall'], None)   # Normalized.
+
+    def test_same_recording_maps_onto_its_current_clock(self):
+        p = {'source': 'A', 'start': 5., 'end': 8., 'clip_wall': None}   # Rendered before it had a dated name.
+        self.assertEqual(shown_wall(p, {'source': 'A', 'clip_wall': 100.}), (105., 108.))
+        self.assertIsNone(shown_wall(p, {'source': 'B', 'clip_wall': 100.}))
+
+    def test_index_finds_far_wall_slices_only_when_they_overlap(self):
+        shown = [dict(source=f'S{i}', start=0., end=10., clip_wall=1000.*i) for i in range(500)]
+        out = unseen([dict(m('a', 8, 0, 10, clip_wall=250_000.), source='B'),
+                      dict(m('b', 8, 0, 10, clip_wall=250_500.), source='C')], shown)
+        self.assertEqual([x['id'] for x in out], ['b'])
+
+    def test_no_wall_clock_and_other_recording_is_never_matched(self):
+        shown = footage(dict(m('old', 8, 0, 10, clip_wall=None), source='A'))
+        out = unseen([dict(m('a', 8, 0, 10, clip_wall=None), source='B')], shown)
+        self.assertEqual([x['id'] for x in out], ['a'])
 
 
 class DedupeTests(unittest.TestCase):

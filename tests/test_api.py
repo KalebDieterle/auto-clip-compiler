@@ -96,6 +96,67 @@ class ApiFlowTests(unittest.TestCase):
         self.assertEqual(run['status'], 'rendered')
         self.assertFalse(run['decisions'][first['id']]['keep'])
 
+    def test_skip_shown_leaves_out_only_what_a_render_played(self):
+        self.judge()
+        review = self.api.get_review(); cut = review['moments'][0]
+        self.api.set_decision(cut['id'], False)
+        self.assertTrue(self.api.start_render()['ok']); self.wait('render_done'); self.wait_idle()
+        folder = Path(self.api.get_state()['run']['folder'])
+        run = json.loads((folder/'run.json').read_text(encoding='utf-8'))
+        self.assertEqual(len(run['shown']), 2)
+
+        def rejudge():
+            self.assertTrue(self.api.scan()['ok']); self.wait('scan_done'); self.wait_idle()
+            self.assertTrue(self.api.start_judge()['ok']); self.wait('review_ready'); self.wait_idle()
+            return self.api.get_review()
+
+        again = rejudge()   # Off (the default): everything comes back.
+        self.assertEqual(len(again['moments']), 3)
+        self.api.save_settings({'skip_shown': True})
+        again = rejudge()   # On: only the moment cut in Review, which never played.
+        self.assertEqual([m['clip'] for m in again['moments']], [cut['clip']])
+        self.assertEqual(again['run']['usage']['shown_before'], 2)
+        # A run rendered before 1.1.5 has no `shown`: its saved Review decisions stand in.
+        del run['shown']; (folder/'run.json').write_text(json.dumps(run), encoding='utf-8')
+        self.assertEqual([m['clip'] for m in rejudge()['moments']], [cut['clip']])
+        # Opening it records that before Review can change its decisions.
+        self.api.open_run(str(folder)); self.api.set_decision(cut['id'], True)
+        saved = json.loads((folder/'run.json').read_text(encoding='utf-8'))
+        self.assertEqual(len(saved['shown']), 2)
+        # Re-rendering: the part file already exists, so nothing new plays and nothing new is recorded.
+        self.api.set_decision(cut['id'], False)
+        self.assertTrue(self.api.start_render()['ok']); self.wait('render_done'); self.wait_idle()
+        self.assertEqual(len(json.loads((folder/'run.json').read_text(encoding='utf-8'))['shown']), 2)
+        # A malformed history entry is skipped, never fatal.
+        saved = json.loads((folder/'run.json').read_text(encoding='utf-8')); saved['shown'].append({})
+        (folder/'run.json').write_text(json.dumps(saved), encoding='utf-8')
+        self.assertEqual([m['clip'] for m in rejudge()['moments']], [cut['clip']])
+
+    def test_shown_footage_inside_a_gap_a_setup_join_could_fill_is_avoided(self):
+        from clipcompiler import context
+        api = Api(judge_fn=self.api._judge_fn); api.save_settings({'lookback': False})
+        lead = {'source': 'A', 'source_hash': 'A', 'source_path': 'a.mp4', 'clip_wall': 100., 'start': 5., 'end': 8.,
+                'duration': 30., 'recorded_at': 130., 'evidence': ['e']}
+        moment = dict(id='m', source='A', source_hash='A', source_path='a.mp4', clip_wall=100., start=10., end=20.,
+                      duration=30., recorded_at=130., score=8, reason='r', clip_name='a.mp4', lenses=['funny'], lead=[lead])
+        shown = [{'source': 'B', 'start': .25, 'end': 1.75, 'clip_wall': 108.}]   # Wall 108.25-109.75: in the 8-10 gap.
+        run_dir = Path(self.home.name)/'g'; run_dir.mkdir()
+        run = {'content_mode': 'funny', 'min_score': 7, 'skill_share': .4, 'mode': 'parts', 'part_minutes': 30}
+        api._finish_judging(run, run_dir, {'moments': [moment], 'recordings': [], 'report': [], 'usage': {'usd': 0.},
+                                           'stopped': None, 'shown': shown}, None)
+        m = run['moments'][0]
+        self.assertEqual(m['avoid'], [[108.25, 109.75]])
+        out = context.resolve(api._kept_of(run))[0]
+        self.assertEqual((out['start'], [(s['start'], s['end']) for s in out['lead']]), (10., [(5., 8.)]))
+        # The same recording rendered under another clock (renamed since): mapped through today's clock only.
+        renamed = [{'source': 'A', 'start': 5., 'end': 8., 'clip_wall': 110.}]
+        lead2 = dict(lead, start=15., end=18.); m2 = dict(moment, start=20., end=30., lead=[lead2])
+        run = {'content_mode': 'funny', 'min_score': 7, 'skill_share': .4, 'mode': 'parts', 'part_minutes': 30}
+        api._finish_judging(run, run_dir, {'moments': [m2], 'recordings': [], 'report': [], 'usage': {'usd': 0.},
+                                           'stopped': None, 'shown': renamed}, None)
+        m = run['moments'][0]
+        self.assertEqual((m['avoid'], [(s['start'], s['end']) for s in m['lead']]), ([[105., 108.]], [(15., 18.)]))
+
     def test_lookback_setup_shows_in_review_can_be_removed_and_renders(self):
         asked = []
         def look(w, m, stop):   # Each moment (1-4 s) builds on a line at 0-0.6 s of its own clip.

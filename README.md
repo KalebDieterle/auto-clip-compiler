@@ -46,6 +46,10 @@ Your clips are never modified or moved.
   the previous replay when the recording runs on, for the line or action the joke builds on (a name
   callback, the thing that started it) and plays that first. Review shows the quoted line and a
   button to remove it. It costs under a cent per kept moment and is saved like every judgment.
+  Turn it off in Settings > Choosing moments.
+- **No repeats, if you want.** Settings > Choosing moments > *Leave out moments already in a rendered
+  compilation* skips footage an earlier finished video already played, including the same moment in
+  an overlapping replay save. Moments you cut in Review were never rendered, so they stay eligible.
 - **Stop at any time.** Nothing already judged is lost; an interrupted batch upload resumes.
 - **Drafts.** Every compilation you haven't rendered yet is listed in one place, to reopen or discard
   (discarding moves it to the Recycle Bin and keeps the saved judgments).

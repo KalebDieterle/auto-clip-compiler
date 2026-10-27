@@ -577,7 +577,9 @@ function drawCards() {
   const kind = run.content_mode || 'funny';
   const bar = kind === 'funny' ? `scoring ${run.min_score}+` : kind === 'skill' ? `with skill ${run.min_skill_score}+`
     : `· funny ${run.min_score}+, skill ${run.min_skill_score}+`;
-  $('#reviewSub').textContent = `${r.totals.total} moments ${bar} · ${run.mode === 'reel' ? `one video, target ${run.target_minutes} min` : `parts of ~${run.part_minutes} min`}`;
+  const skipped = run.usage?.shown_before;
+  $('#reviewSub').textContent = `${r.totals.total} moments ${bar} · ${run.mode === 'reel' ? `one video, target ${run.target_minutes} min` : `parts of ~${run.part_minutes} min`}`
+    + (skipped ? ` · ${skipped} left out (already in a compilation)` : '');
   thumbObserver?.disconnect();
   // Only cards that stay on screen briefly get a thumbnail, so a fast scroll doesn't queue hundreds of ffmpeg jobs.
   thumbObserver = new IntersectionObserver((entries) => entries.forEach((en) => {
@@ -586,7 +588,10 @@ function drawCards() {
     en.target.thumbWait = setTimeout(() => { thumbObserver.unobserve(en.target); loadThumb(en.target); }, 150);
   }), { root: cards, rootMargin: '200px' });
   cards.innerHTML = '';
-  if (!r.moments.length) { cards.innerHTML = '<div class="empty">No moments reached the minimum score. Try a lower score or a wider date range.</div>'; }
+  if (!r.moments.length) {
+    cards.innerHTML = skipped ? '<div class="empty">Every moment that reached the minimum score is already in a rendered compilation. Turn off "Leave out moments already in a rendered compilation" in Settings to see them.</div>'
+      : '<div class="empty">No moments reached the minimum score. Try a lower score or a wider date range.</div>';
+  }
   r.moments.forEach((m, i) => {
     const el = document.createElement('div');
     el.className = 'card'; el.dataset.i = i; el.style.animationDelay = Math.min(i, 24) * 18 + 'ms';
@@ -822,6 +827,7 @@ onEnter.settings = async () => {
   $('#keyRemove').disabled = $('#keyTest').disabled = !S.state.key.present;
   seg($('#height'), s.height); seg($('#fps'), s.fps);
   $('#loudnorm').checked = s.loudnorm; $('#timestamp').checked = s.timestamp_overlay;
+  $('#skipShown').checked = s.skip_shown; $('#lookback').checked = s.lookback;
   $('#workers').value = s.workers; $('#workersOut').textContent = s.workers; fillRange($('#workers'));
   setFolder($('#cachePick'), S.state.cache.folder);
   seg($('#gameOverride'), s.game_override);
@@ -845,6 +851,8 @@ $('#editProfiles').addEventListener('click', () => call('edit_profiles'));
 onSeg($('#fps'), (v) => saveSettings({ fps: Number(v) }));
 $('#loudnorm').addEventListener('change', (e) => saveSettings({ loudnorm: e.target.checked }));
 $('#timestamp').addEventListener('change', (e) => saveSettings({ timestamp_overlay: e.target.checked }));
+$('#skipShown').addEventListener('change', (e) => saveSettings({ skip_shown: e.target.checked }));
+$('#lookback').addEventListener('change', (e) => saveSettings({ lookback: e.target.checked }));
 $('#workers').addEventListener('input', (e) => { $('#workersOut').textContent = e.target.value; fillRange(e.target); });
 $('#workers').addEventListener('change', (e) => saveSettings({ workers: Number(e.target.value) }));
 $('#cachePick').addEventListener('click', async () => {

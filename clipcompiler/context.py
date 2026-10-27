@@ -194,6 +194,13 @@ def _cut(s, span):
     return out
 
 
+def cut_all(s, spans):
+    """s without any of the wall spans."""
+    left = [s]
+    for span in spans: left = [q for p in left for q in _cut(p, span)]
+    return left
+
+
 def _clear(a, b, played, clip_wall):
     """True when footage [a, b] of a recording shows nothing the reel already played (a gap safe to fill)."""
     if clip_wall is None: return True
@@ -207,14 +214,13 @@ def resolve(kept):
     moment are kept while they fit MAX_ADDED (one that cannot fit is skipped, the others still count); setups
     within JOIN of each other in one recording play straight through, and one that ends within JOIN of the
     moment in its recording moves the moment's start instead, so that cut has no seam. Returns new dicts."""
-    out, played = [], []   # played: wall spans of the moment the reel shows just before this one.
+    out, previous = [], []   # previous: wall spans of the moment the reel shows just before this one.
     for m in sorted(kept, key=lambda m: (m['recorded_at'], m['start'])):
         m = dict(m); pieces = []
         core = _wall(m)
+        played = previous + [tuple(w) for w in m.get('avoid') or []]   # avoid: footage an earlier compilation played.
         for s in m.get('lead') or []:
-            left = [s]
-            for span in played + ([core] if core else []):
-                left = [q for p in left for q in _cut(p, span)]
+            left = cut_all(s, played + ([core] if core else []))
             if s['source'] == m['source']:
                 left = [dict(p, end=min(p['end'], m['start'])) for p in left]
             pieces += [p for p in left if p['end']-p['start'] >= .05]
@@ -240,5 +246,5 @@ def resolve(kept):
             m['start'] = joined.pop()['start']
         m['lead'] = joined
         out.append(m)
-        played = [w for w in [_wall(s) for s in joined] + [_wall(m)] if w]
+        previous = [w for w in [_wall(s) for s in joined] + [_wall(m)] if w]
     return out

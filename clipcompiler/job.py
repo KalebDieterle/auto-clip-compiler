@@ -14,7 +14,7 @@ import time
 
 from . import context, gemini, skill
 from .media import Cancelled, probe, window
-from .reel import dedupe, merge_lenses, part_name, part_plan, pick, split_parts, moments_for, day
+from .reel import dedupe, merge_lenses, part_name, part_plan, pick, split_parts, moments_for, day, unseen, Footage
 from .render import publish
 from .store import atomic_json, file_hash
 
@@ -61,9 +61,11 @@ class JudgeJob:
     def __init__(self, clips, cache, scratch, *, api_key=None, model=gemini.DEFAULT_MODEL, workers=4,
                  budget_usd=None, min_score=7, target_seconds=None, cache_only=False, hasher=file_hash,
                  ffmpeg='ffmpeg', ffprobe='ffprobe', emit=None, cancel=None, judge_fn=None,
-                 content_mode='funny', profiles=None, min_skill_score=7, skill_share=.4, skill_fn=None):
+                 content_mode='funny', profiles=None, min_skill_score=7, skill_share=.4, skill_fn=None, shown=None):
         """clips: (recorded_at, time_from_filename, path) newest first. target_seconds: stop once this much
         reel-worthy footage exists (None judges every clip). content_mode: funny, skill or both.
+        shown: footage earlier compilations played (reel.footage); moments repeating it are left out, so they
+        neither reach Review nor count toward the target.
         Tests replace Gemini with judge_fn(path, stop) (funny) and skill_fn(kind, path, stop, profile, play,
         window) (kind 'triage' or 'detail')."""
         self.clips, self.cache, self.scratch = clips, Path(cache), Path(scratch)
@@ -76,11 +78,12 @@ class JudgeJob:
         self.mode, self.profiles = content_mode, profiles or skill.Profiles()
         self.min_skill_score, self.skill_share = min_skill_score, skill_share
         self.funny, self.skilled = content_mode in ('funny', 'both'), content_mode in ('skill', 'both')
+        self.shown = Footage(shown or [])
         self.stop = cancel or threading.Event(); self.reason = None
         self.lock = threading.Lock(); self.local = threading.local()
         self.report, self.moments, self.recordings, self.done = [], [], [], 0
         self.usage = {'clips': 0, 'cached': 0, 'failed': 0, 'input_tokens': 0, 'output_tokens': 0,
-                      'thinking_tokens': 0, 'usd': 0., 'details': 0}
+                      'thinking_tokens': 0, 'usd': 0., 'details': 0, 'shown_before': 0}
 
     def halt(self, reason, message=''):
         """Stop starting new clips; clips already being judged finish and are cached."""
@@ -162,7 +165,11 @@ class JudgeJob:
             return self.finish(path, 'failed', error=text[:500])
         found = list(moments_for(path, when, hint, funny, meta, digest)) if funny else []
         skilled = list(skill.moments_for(path, when, hint, record, meta, digest, profile)) if record else []
+        good = lambda ms, floor: sum(m['score'] >= floor for m in ms)   # Only moments that could have made Review count.
+        before = good(found, self.min_score) + good(skilled, self.min_skill_score)
+        if self.shown: found, skilled = unseen(found, self.shown), unseen(skilled, self.shown)
         with self.lock:
+            self.usage['shown_before'] += before - good(found, self.min_score) - good(skilled, self.min_skill_score)
             self.recordings.append(context.recording(when, hint, path, meta['duration'], digest))
             self.usage['clips'] += 1; self.usage['cached'] += not fresh
             spent = self._spend(fresh)
@@ -236,7 +243,7 @@ class JudgeJob:
         self.usage['judged_seconds'] = round(time.monotonic()-started)
         self.emit({'type': 'judge_done', 'stopped': reason, 'usage': dict(self.usage)})
         return {'moments': self.moments, 'report': self.report, 'usage': self.usage, 'stopped': reason,
-                'recordings': self.recordings}
+                'recordings': self.recordings, 'shown': self.shown.slices}
 
 
 def candidates(moments, min_score, min_skill_score=None):
@@ -376,8 +383,9 @@ def render_reel(chosen, out, settings, emit=None, cancel=None, name=None):
     return target
 
 
-def render_parts(moments, out, part_seconds, settings, emit=None, cancel=None, only=None):
-    """Chronological parts; an existing part file is kept, so a re-run renders only what's missing."""
+def render_parts(moments, out, part_seconds, settings, emit=None, cancel=None, only=None, on_played=None):
+    """Chronological parts; an existing part file is kept, so a re-run renders only what's missing.
+    on_played(moments): called with each part's moments (setups resolved) as soon as it is encoded."""
     emit = emit or (lambda e: None); out = Path(out)
     parts = split_parts(context.resolve(moments), part_seconds); plan = part_plan(parts)
     emit({'type': 'render_start', 'parts': len(parts), 'plan': plan}); files = []
@@ -389,6 +397,7 @@ def render_parts(moments, out, part_seconds, settings, emit=None, cancel=None, o
                             on_progress=lambda d, n, i=row['part']: emit({'type': 'render', 'part': i, 'parts': len(parts),
                                                                          'done': d, 'total': n}))
             os.replace(final/'Combined_highlights.mp4', target)
+            if on_played: on_played(part)
         files.append(str(target))
         emit({'type': 'part_done', 'part': row['part'], 'file': str(target)})
     emit({'type': 'render_done', 'files': files})

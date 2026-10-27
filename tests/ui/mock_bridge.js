@@ -11,7 +11,7 @@
     output: opt.onboarded ? 'D:\\Videos\\Highlights' : '', cache_dir: '', mode: 'parts', judge_mode: opt.judgeMode || 'live', target_minutes: 30,
     part_minutes: 30, min_score: 7, budget_usd: 5, workers: 4, height: 1080, fps: 60, loudnorm: true,
     timestamp_overlay: false, model: 'gemini-flash-latest', content_mode: opt.content, min_skill_score: 7,
-    skill_preset: 'balanced', skill_share: 0.4, game_override: 'auto' };
+    skill_preset: 'balanced', skill_share: 0.4, game_override: 'auto', lookback: true, skip_shown: false };
   const plays = [
     { reason: 'Flicks onto a head through the smoke, one tap', tags: ['Headshot', 'Big flick', 'Fast reaction', 'One-tap', 'Through smoke'], bad: [], score: 9 },
     { reason: 'Wins a 1v3 on B site with 8 HP left', tags: ['3K', '1v3', '2 headshots', 'Low HP', 'Decisive'], bad: [], score: 10 },
